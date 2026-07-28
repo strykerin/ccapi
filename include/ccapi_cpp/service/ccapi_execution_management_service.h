@@ -47,6 +47,12 @@ class ExecutionManagementService : public Service {
 
   virtual ~ExecutionManagementService() {}
 
+  // decides whether a subscription should be routed to the websocket order entry connection (baseUrlWsOrderEntry) instead of the default baseUrlWs; overridable
+  // so exchanges can route additional fields (e.g. user-data streams that now live on the ws-api host) to that connection
+  virtual bool useWebsocketOrderEntryConnection(const std::set<std::string>& fieldSet) {
+    return fieldSet.find(CCAPI_EM_WEBSOCKET_ORDER_ENTRY) != fieldSet.end();
+  }
+
   // each subscription creates a unique websocket connection
   void subscribe(std::vector<Subscription>& subscriptionList) override {
     CCAPI_LOGGER_FUNCTION_ENTER;
@@ -63,7 +69,7 @@ class ExecutionManagementService : public Service {
           const auto& fieldSet = subscription.getFieldSet();
           const auto& proxyUrl = subscription.getProxyUrl();
 
-          if (fieldSet.find(CCAPI_EM_WEBSOCKET_ORDER_ENTRY) != fieldSet.end()) {
+          if (that->useWebsocketOrderEntryConnection(fieldSet)) {
             auto wsConnectionPtr = std::make_shared<WsConnection>(that->baseUrlWsOrderEntry, "", std::vector<Subscription>{subscription}, credential, proxyUrl);
             that->setWsConnectionStream(wsConnectionPtr);
             CCAPI_LOGGER_WARN("about to subscribe with new wsConnectionPtr " + toString(*wsConnectionPtr));
