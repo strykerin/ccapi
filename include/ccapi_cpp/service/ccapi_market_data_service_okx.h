@@ -424,6 +424,17 @@ class MarketDataServiceOkx : public MarketDataService {
     element.insert(CCAPI_CONTRACT_SIZE, x["ctVal"].GetString());
     element.insert(CCAPI_CONTRACT_MULTIPLIER, x["ctMult"].GetString());
     element.insert(CCAPI_INSTRUMENT_STATUS, x["state"].GetString());
+    auto itInstIdCode = x.FindMember("instIdCode");
+    if (itInstIdCode != x.MemberEnd()) {
+      const rj::Value& v = itInstIdCode->value;
+      if (v.IsString()) {
+        element.insert(CCAPI_INST_ID_CODE, v.GetString());
+      } else if (v.IsInt64()) {
+        element.insert(CCAPI_INST_ID_CODE, std::to_string(v.GetInt64()));
+      } else if (v.IsUint64()) {
+        element.insert(CCAPI_INST_ID_CODE, std::to_string(v.GetUint64()));
+      }
+    }
   }
 
   void convertTextMessageToMarketDataMessage(const Request& request, boost::beast::string_view textMessageView, const TimePoint& timeReceived, Event& event,
