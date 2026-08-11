@@ -744,6 +744,90 @@ TEST_F(ExecutionManagementServiceOkxTest, createEventWebsocketTradeCancelOrder) 
   EXPECT_EQ(element.getValue(CCAPI_EM_ORDER_ID), "325631903554482176");
 }
 
+TEST_F(ExecutionManagementServiceOkxTest, createEventBalanceUpdate) {
+  Subscription subscription(CCAPI_EXCHANGE_NAME_OKX, "", CCAPI_EM_BALANCE_UPDATE);
+  std::string textMessage = R"(
+    {
+      "arg": {
+        "channel": "account",
+        "uid": "77982378738415879"
+      },
+      "data": [
+        {
+          "adjEq": "55444.13763754825",
+          "borrowFroz": "0",
+          "details": [
+            {
+              "availBal": "4834.317093622894",
+              "availEq": "4834.3170936228935",
+              "cashBal": "4850.435693622894",
+              "ccy": "USDT",
+              "eq": "4992.394792712729",
+              "frozenBal": "158.0776990898355",
+              "uTime": "1705559737202"
+            },
+            {
+              "availBal": "1.5",
+              "availEq": "",
+              "cashBal": "2",
+              "ccy": "BTC",
+              "eq": "2",
+              "frozenBal": "0.5",
+              "uTime": "1705559737202"
+            }
+          ],
+          "isoEq": "0",
+          "totalEq": "55868.06403101889",
+          "uTime": "1705558381203"
+        }
+      ]
+    }
+)";
+  rj::Document document;
+  document.Parse<rj::kParseNumbersAsStringsFlag>(textMessage.c_str());
+  auto messageList = this->service->createEvent(std::make_shared<WsConnection>(), subscription, textMessage, document, "", this->now).getMessageList();
+  EXPECT_EQ(messageList.size(), 1);
+  verifyCorrelationId(messageList, subscription.getCorrelationId());
+  auto message = messageList.at(0);
+  EXPECT_EQ(message.getType(), Message::Type::EXECUTION_MANAGEMENT_EVENTS_BALANCE_UPDATE);
+  EXPECT_EQ(message.getTime(), UtilTime::makeTimePointFromMilliseconds(1705558381203));
+  auto elementList = message.getElementList();
+  EXPECT_EQ(elementList.size(), 2);
+  Element element = elementList.at(0);
+  EXPECT_EQ(element.getValue(CCAPI_EM_ASSET), "USDT");
+  EXPECT_EQ(element.getValue(CCAPI_EM_QUANTITY_AVAILABLE_FOR_TRADING), "4834.3170936228935");
+  EXPECT_EQ(element.getValue(CCAPI_EM_QUANTITY_TOTAL), "4850.435693622894");
+  Element elementFallback = elementList.at(1);
+  EXPECT_EQ(elementFallback.getValue(CCAPI_EM_ASSET), "BTC");
+  EXPECT_EQ(elementFallback.getValue(CCAPI_EM_QUANTITY_AVAILABLE_FOR_TRADING), "1.5");
+  EXPECT_EQ(elementFallback.getValue(CCAPI_EM_QUANTITY_TOTAL), "2");
+}
+
+TEST_F(ExecutionManagementServiceOkxTest, createEventBalanceUpdateEmptyDetails) {
+  Subscription subscription(CCAPI_EXCHANGE_NAME_OKX, "", CCAPI_EM_BALANCE_UPDATE);
+  std::string textMessage = R"(
+    {
+      "arg": {
+        "channel": "account",
+        "uid": "77982378738415879"
+      },
+      "data": [
+        {
+          "adjEq": "",
+          "details": [],
+          "isoEq": "0",
+          "totalEq": "0",
+          "uTime": "1705558381203"
+        }
+      ]
+    }
+)";
+  rj::Document document;
+  document.Parse<rj::kParseNumbersAsStringsFlag>(textMessage.c_str());
+  auto messageList = this->service->createEvent(std::make_shared<WsConnection>(), subscription, textMessage, document, "", this->now).getMessageList();
+  EXPECT_EQ(messageList.size(), 0);
+}
+
 } /* namespace ccapi */
 #endif
 #endif
