@@ -89,6 +89,11 @@ class ExecutionManagementServiceOkx : public ExecutionManagementService {
       if (key == "side") {
         value = (value == CCAPI_EM_ORDER_SIDE_BUY || value == "buy") ? "buy" : "sell";
       }
+      if (key == "instIdCode") {
+        rjValue.AddMember(rj::Value(key.c_str(), allocator).Move(),
+                          rj::Value(static_cast<int64_t>(std::strtoll(value.c_str(), nullptr, 10))).Move(), allocator);
+        continue;
+      }
       rjValue.AddMember(rj::Value(key.c_str(), allocator).Move(), rj::Value(value.c_str(), allocator).Move(), allocator);
     }
     if (operation == Request::Operation::CREATE_ORDER && param.find("tag") == param.end()) {
