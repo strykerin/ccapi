@@ -461,7 +461,7 @@ class ExecutionManagementServiceOkx : public ExecutionManagementService {
         }
         if (fieldSet.find(CCAPI_EM_BALANCE_UPDATE) != fieldSet.end()) {
           rj::Value arg(rj::kObjectType);
-          arg.AddMember("channel", rj::Value("balance_and_position").Move(), allocator);
+          arg.AddMember("channel", rj::Value("account").Move(), allocator);
           args.PushBack(arg, allocator);
         }
         if (!args.Empty()) {
@@ -607,17 +607,25 @@ class ExecutionManagementServiceOkx : public ExecutionManagementService {
             message.setElementList(elementList);
             messageList.emplace_back(std::move(message));
           }
-        } else if (channel == "balance_and_position") {
+        } else if (channel == "account") {
           for (const auto& x : data.GetArray()) {
+            auto itDetails = x.FindMember("details");
+            if (itDetails == x.MemberEnd() || itDetails->value.Empty()) {
+              continue;
+            }
             Message message;
             message.setTimeReceived(timeReceived);
             message.setCorrelationIdList({subscription.getCorrelationId()});
-            message.setTime(TimePoint(std::chrono::milliseconds(std::stoll(x["pTime"].GetString()))));
+            auto itUTime = x.FindMember("uTime");
+            std::string uTime = itUTime != x.MemberEnd() ? itUTime->value.GetString() : "";
+            message.setTime(uTime.empty() ? timeReceived : TimePoint(std::chrono::milliseconds(std::stoll(uTime))));
             message.setType(Message::Type::EXECUTION_MANAGEMENT_EVENTS_BALANCE_UPDATE);
             std::vector<Element> elementList;
-            for (const auto& y : x["balData"].GetArray()) {
+            for (const auto& y : itDetails->value.GetArray()) {
               Element element;
               element.insert(CCAPI_EM_ASSET, y["ccy"].GetString());
+              std::string availEq = y["availEq"].GetString();
+              element.insert(CCAPI_EM_QUANTITY_AVAILABLE_FOR_TRADING, availEq.empty() ? y["availBal"].GetString() : availEq);
               element.insert(CCAPI_EM_QUANTITY_TOTAL, y["cashBal"].GetString());
               elementList.emplace_back(std::move(element));
             }
