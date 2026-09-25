@@ -12,8 +12,12 @@ class ExecutionManagementServiceBinanceUsdsFutures : public ExecutionManagementS
                                                SessionConfigs sessionConfigs, ServiceContextPtr serviceContextPtr)
       : ExecutionManagementServiceBinanceDerivativesBase(eventHandler, sessionOptions, sessionConfigs, serviceContextPtr) {
     this->exchangeName = CCAPI_EXCHANGE_NAME_BINANCE_USDS_FUTURES;
-    this->baseUrlWs = sessionConfigs.getUrlWebsocketBase().at(this->exchangeName) + "/ws";
-    this->baseUrlWsOrderEntry = sessionConfigs.getUrlWebsocketOrderEntryBase().at(this->exchangeName) + CCAPI_BINANCE_USDS_FUTURES_WS_ORDER_ENTRY_PATH;
+    auto websocketRoot = UtilString::rtrim(sessionConfigs.getUrlWebsocketBase().at(this->exchangeName), '/');
+    this->baseUrlWs = websocketRoot + "/private/ws";
+    auto websocketOrderEntryRoot = UtilString::rtrim(sessionConfigs.getUrlWebsocketOrderEntryBase().at(this->exchangeName), '/');
+    this->baseUrlWsOrderEntry = UtilString::endsWith(websocketOrderEntryRoot, CCAPI_BINANCE_USDS_FUTURES_WS_ORDER_ENTRY_PATH)
+                                        ? websocketOrderEntryRoot
+                                        : websocketOrderEntryRoot + CCAPI_BINANCE_USDS_FUTURES_WS_ORDER_ENTRY_PATH;
     this->baseUrlRest = sessionConfigs.getUrlRestBase().at(this->exchangeName);
     this->setHostRestFromUrlRest(this->baseUrlRest);
     // this->setHostWsFromUrlWs(this->baseUrlWs);
@@ -38,6 +42,43 @@ class ExecutionManagementServiceBinanceUsdsFutures : public ExecutionManagementS
   }
 
   virtual ~ExecutionManagementServiceBinanceUsdsFutures() {}
+#ifndef CCAPI_EXPOSE_INTERNAL
+
+ protected:
+#endif
+  bool useWebsocketOrderEntryConnection(const std::set<std::string>& fieldSet) override {
+    return fieldSet.find(CCAPI_EM_WEBSOCKET_ORDER_ENTRY) != fieldSet.end();
+  }
+
+  bool shouldRetryRequest(const Request& request) const override {
+    return request.getOperation() != Request::Operation::CREATE_ORDER && request.getOperation() != Request::Operation::CANCEL_ORDER &&
+           request.getOperation() != Request::Operation::CANCEL_OPEN_ORDERS;
+  }
+
+  Message::Type requestFailureMessageType(const Request& request) const override {
+    return this->shouldRetryRequest(request) ? Message::Type::REQUEST_FAILURE : Message::Type::REQUEST_OUTCOME_UNKNOWN;
+  }
+
+ public:
+  void subscribe(std::vector<Subscription>& subscriptionList) override {
+    std::vector<Subscription> validSubscriptionList;
+    for (const auto& subscription : subscriptionList) {
+      const auto& fieldSet = subscription.getFieldSet();
+      bool hasOrderEntry = fieldSet.find(CCAPI_EM_WEBSOCKET_ORDER_ENTRY) != fieldSet.end();
+      bool hasAccountEvents = fieldSet.find(CCAPI_EM_ORDER_UPDATE) != fieldSet.end() || fieldSet.find(CCAPI_EM_PRIVATE_TRADE) != fieldSet.end() ||
+                              fieldSet.find(CCAPI_EM_PRIVATE_TRADE_LITE) != fieldSet.end() || fieldSet.find(CCAPI_EM_BALANCE_UPDATE) != fieldSet.end() ||
+                              fieldSet.find(CCAPI_EM_POSITION_UPDATE) != fieldSet.end();
+      if (hasOrderEntry && hasAccountEvents) {
+        this->onError(Event::Type::SUBSCRIPTION_STATUS, Message::Type::SUBSCRIPTION_FAILURE,
+                      "USD-M WEBSOCKET_ORDER_ENTRY and account-event fields require separate subscriptions", {subscription.getCorrelationId()});
+      } else {
+        validSubscriptionList.push_back(subscription);
+      }
+    }
+    if (!validSubscriptionList.empty()) {
+      ExecutionManagementService::subscribe(validSubscriptionList);
+    }
+  }
 };
 
 } /* namespace ccapi */

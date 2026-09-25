@@ -37,6 +37,7 @@ class Subscription {
       this->optionMap[CCAPI_MARKET_DEPTH_RETURN_UPDATE] = CCAPI_MARKET_DEPTH_RETURN_UPDATE_DEFAULT;
       this->optionMap[CCAPI_FETCH_MARKET_DEPTH_INITIAL_SNAPSHOT_DELAY_MILLISECONDS] = CCAPI_FETCH_MARKET_DEPTH_INITIAL_SNAPSHOT_DELAY_MILLISECONDS_DEFAULT;
       this->optionMap[CCAPI_CANDLESTICK_INTERVAL_SECONDS] = CCAPI_CANDLESTICK_INTERVAL_SECONDS_DEFAULT;
+      this->optionMap[CCAPI_MARK_PRICE_UPDATE_SPEED_MILLISECONDS] = CCAPI_MARK_PRICE_UPDATE_SPEED_MILLISECONDS_DEFAULT;
       for (const auto& option : optionList) {
         auto optionKeyValue = UtilString::split(option, "=");
         this->optionMap[optionKeyValue.at(0)] = optionKeyValue.at(1);
@@ -52,7 +53,7 @@ class Subscription {
     } else if (std::includes(executionManagementSubscriptionFieldSet.begin(), executionManagementSubscriptionFieldSet.end(), this->fieldSet.begin(),
                              this->fieldSet.end())) {
       this->serviceName = CCAPI_EXECUTION_MANAGEMENT;
-    } else if (field == CCAPI_MARKET_DEPTH || field == CCAPI_TRADE || field == CCAPI_AGG_TRADE || field == CCAPI_CANDLESTICK) {
+    } else if (field == CCAPI_MARKET_DEPTH || field == CCAPI_TRADE || field == CCAPI_AGG_TRADE || field == CCAPI_CANDLESTICK || field == CCAPI_MARK_PRICE) {
       this->serviceName = CCAPI_MARKET_DATA;
     }
     CCAPI_LOGGER_TRACE("this->serviceName = " + this->serviceName);
