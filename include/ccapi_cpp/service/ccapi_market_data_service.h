@@ -1,6 +1,8 @@
 #pragma once
 
 #ifdef CCAPI_ENABLE_SERVICE_MARKET_DATA
+#include <algorithm>
+#include <cstdint>
 #include <functional>
 #include <map>
 #include <string>
@@ -112,6 +114,13 @@ class MarketDataService : public Service {
 
   typedef boost::system::error_code ErrorCode;
 
+  struct BufferedOrderBookUpdate {
+    int64_t firstUpdateId{};
+    int64_t finalUpdateId{};
+    int64_t previousFinalUpdateId{-1};
+    MarketDataMessage::TypeForOwingData data;
+  };
+
   std::map<std::string, std::vector<Subscription>> groupSubscriptionListByInstrumentGroup(const std::vector<Subscription>& subscriptionList) {
     std::map<std::string, std::vector<Subscription>> groups;
     for (const auto& subscription : subscriptionList) {
@@ -164,7 +173,8 @@ class MarketDataService : public Service {
       if (marketDataMessage.type == MarketDataMessage::Type::MARKET_DATA_EVENTS_MARKET_DEPTH ||
           marketDataMessage.type == MarketDataMessage::Type::MARKET_DATA_EVENTS_TRADE ||
           marketDataMessage.type == MarketDataMessage::Type::MARKET_DATA_EVENTS_AGG_TRADE ||
-          marketDataMessage.type == MarketDataMessage::Type::MARKET_DATA_EVENTS_CANDLESTICK) {
+          marketDataMessage.type == MarketDataMessage::Type::MARKET_DATA_EVENTS_CANDLESTICK ||
+          marketDataMessage.type == MarketDataMessage::Type::MARKET_DATA_EVENTS_MARK_PRICE) {
         // if (this->sessionOptions.warnLateEventMaxMilliseconds > 0 &&
         //     std::chrono::duration_cast<std::chrono::milliseconds>(timeReceived - marketDataMessage.tp).count() >
         //         this->sessionOptions.warnLateEventMaxMilliseconds &&
@@ -247,6 +257,33 @@ class MarketDataService : public Service {
           bool isSolicited = marketDataMessage.recapType == MarketDataMessage::RecapType::SOLICITED;
           this->processExchangeProvidedCandlestick(wsConnectionPtr, channelId, symbolId, event, marketDataMessage.tp, timeReceived, marketDataMessage.data,
                                                    field, optionMap, correlationIdList, isSolicited);
+        }
+        if (marketDataMessage.data.find(MarketDataMessage::DataType::MARK_PRICE) != marketDataMessage.data.end()) {
+          Message message;
+          message.setTimeReceived(timeReceived);
+          message.setTime(marketDataMessage.tp);
+          message.setType(Message::Type::MARKET_DATA_EVENTS_MARK_PRICE);
+          message.setCorrelationIdList(correlationIdList);
+          std::vector<Element> elementList;
+          for (const auto& dataPoint : marketDataMessage.data.at(MarketDataMessage::DataType::MARK_PRICE)) {
+            Element element;
+            auto insertIfPresent = [&dataPoint, &element](MarketDataMessage::DataFieldType dataFieldType, const char* elementName) {
+              auto it = dataPoint.find(dataFieldType);
+              if (it != dataPoint.end()) {
+                element.insert(elementName, it->second);
+              }
+            };
+            insertIfPresent(MarketDataMessage::DataFieldType::SYMBOL, CCAPI_INSTRUMENT);
+            insertIfPresent(MarketDataMessage::DataFieldType::MARK_PRICE, CCAPI_MARK_PRICE_VALUE);
+            insertIfPresent(MarketDataMessage::DataFieldType::INDEX_PRICE, CCAPI_INDEX_PRICE);
+            insertIfPresent(MarketDataMessage::DataFieldType::ESTIMATED_SETTLEMENT_PRICE, CCAPI_ESTIMATED_SETTLEMENT_PRICE);
+            insertIfPresent(MarketDataMessage::DataFieldType::FUNDING_RATE, CCAPI_FUNDING_RATE);
+            insertIfPresent(MarketDataMessage::DataFieldType::NEXT_FUNDING_TIME_MILLISECONDS, CCAPI_NEXT_FUNDING_TIME_MILLISECONDS);
+            insertIfPresent(MarketDataMessage::DataFieldType::EVENT_TIME_MILLISECONDS, CCAPI_EVENT_TIME_MILLISECONDS);
+            elementList.emplace_back(std::move(element));
+          }
+          message.setElementList(elementList);
+          event.addMessages({message});
         }
       } else {
         CCAPI_LOGGER_WARN("websocket event type is unknown for " + toString(marketDataMessage));
@@ -364,6 +401,7 @@ class MarketDataService : public Service {
     this->closeByConnectionIdChannelIdSymbolIdMap.erase(wsConnectionPtr->id);
     this->orderBookChecksumByConnectionIdSymbolIdMap.erase(wsConnectionPtr->id);
     this->marketDataMessageDataBufferByConnectionIdExchangeSubscriptionIdVersionIdMap.erase(wsConnectionPtr->id);
+    this->orderBookRecoveryGenerationByConnectionIdExchangeSubscriptionIdMap.erase(wsConnectionPtr->id);
     if (this->fetchMarketDepthInitialSnapshotTimerByConnectionIdExchangeSubscriptionIdMap.find(wsConnectionPtr->id) !=
         this->fetchMarketDepthInitialSnapshotTimerByConnectionIdExchangeSubscriptionIdMap.end()) {
       for (const auto& x : this->fetchMarketDepthInitialSnapshotTimerByConnectionIdExchangeSubscriptionIdMap.at(wsConnectionPtr->id)) {
@@ -1427,56 +1465,130 @@ class MarketDataService : public Service {
     }
   }
 
-  void processOrderBookWithVersionId(int64_t versionId, std::shared_ptr<WsConnection> wsConnectionPtr, const std::string& channelId,
+  bool processOrderBookWithVersionId(int64_t versionId, std::shared_ptr<WsConnection> wsConnectionPtr, const std::string& channelId,
                                      const std::string& symbolId, const std::string& exchangeSubscriptionId,
                                      const std::map<std::string, std::string>& optionMap, std::vector<MarketDataMessage>& marketDataMessageList,
-                                     const MarketDataMessage& marketDataMessage) {
+                                     const MarketDataMessage& marketDataMessage, int64_t firstUpdateId = -1, int64_t previousFinalUpdateId = -1) {
     if (this->processedInitialSnapshotByConnectionIdChannelIdSymbolIdMap[wsConnectionPtr->id][channelId][symbolId]) {
+      if (this->enableOrderBookUpdateRangeCheck) {
+        auto connectionIt = this->orderbookVersionIdByConnectionIdExchangeSubscriptionIdMap.find(wsConnectionPtr->id);
+        if (connectionIt == this->orderbookVersionIdByConnectionIdExchangeSubscriptionIdMap.end()) {
+          return false;
+        }
+        auto versionIt = connectionIt->second.find(exchangeSubscriptionId);
+        if (versionIt == connectionIt->second.end() || previousFinalUpdateId != versionIt->second) {
+          this->processedInitialSnapshotByConnectionIdChannelIdSymbolIdMap[wsConnectionPtr->id][channelId][symbolId] = false;
+          this->snapshotBidByConnectionIdChannelIdSymbolIdMap[wsConnectionPtr->id][channelId][symbolId].clear();
+          this->snapshotAskByConnectionIdChannelIdSymbolIdMap[wsConnectionPtr->id][channelId][symbolId].clear();
+          this->marketDataMessageDataBufferByConnectionIdExchangeSubscriptionIdVersionIdMap[wsConnectionPtr->id].erase(exchangeSubscriptionId);
+          this->orderbookVersionIdByConnectionIdExchangeSubscriptionIdMap[wsConnectionPtr->id].erase(exchangeSubscriptionId);
+          return false;
+        }
+      }
       if (versionId > this->orderbookVersionIdByConnectionIdExchangeSubscriptionIdMap.at(wsConnectionPtr->id).at(exchangeSubscriptionId)) {
-        marketDataMessageList.emplace_back(std::move(marketDataMessage));
+        marketDataMessageList.emplace_back(marketDataMessage);
         this->orderbookVersionIdByConnectionIdExchangeSubscriptionIdMap[wsConnectionPtr->id][exchangeSubscriptionId] = versionId;
       }
     } else {
-      if (this->marketDataMessageDataBufferByConnectionIdExchangeSubscriptionIdVersionIdMap[wsConnectionPtr->id][exchangeSubscriptionId].empty()) {
+      auto& buffer = this->marketDataMessageDataBufferByConnectionIdExchangeSubscriptionIdVersionIdMap[wsConnectionPtr->id][exchangeSubscriptionId];
+      bool shouldStartRecovery = buffer.empty();
+      if (firstUpdateId < 0) {
+        firstUpdateId = versionId;
+      }
+      buffer[versionId] = {firstUpdateId, versionId, previousFinalUpdateId, MarketDataMessage::ConvertDataToOwingData(marketDataMessage.data)};
+      if (shouldStartRecovery) {
+        auto recoveryGeneration = ++this->nextOrderBookRecoveryGeneration;
+        this->orderBookRecoveryGenerationByConnectionIdExchangeSubscriptionIdMap[wsConnectionPtr->id][exchangeSubscriptionId] = recoveryGeneration;
         int delayMilliseconds = std::stoi(optionMap.at(CCAPI_FETCH_MARKET_DEPTH_INITIAL_SNAPSHOT_DELAY_MILLISECONDS));
         if (delayMilliseconds > 0) {
           TimerPtr timerPtr(new boost::asio::steady_timer(*this->serviceContextPtr->ioContextPtr, std::chrono::milliseconds(delayMilliseconds)));
-          timerPtr->async_wait([wsConnectionPtr, exchangeSubscriptionId, delayMilliseconds, that = this](ErrorCode const& ec) {
+          timerPtr->async_wait([wsConnectionPtr, exchangeSubscriptionId, delayMilliseconds, recoveryGeneration, that = this](ErrorCode const& ec) {
             if (ec) {
-              that->onError(Event::Type::SUBSCRIPTION_STATUS, Message::Type::GENERIC_ERROR, ec, "timer");
+              if (ec != boost::asio::error::operation_aborted) {
+                that->onError(Event::Type::SUBSCRIPTION_STATUS, Message::Type::GENERIC_ERROR, ec, "timer");
+              }
             } else {
-              that->buildOrderBookInitial(wsConnectionPtr, exchangeSubscriptionId, delayMilliseconds);
+              that->buildOrderBookInitial(wsConnectionPtr, exchangeSubscriptionId, delayMilliseconds, recoveryGeneration);
             }
           });
           this->fetchMarketDepthInitialSnapshotTimerByConnectionIdExchangeSubscriptionIdMap[wsConnectionPtr->id][exchangeSubscriptionId] = timerPtr;
         } else {
-          this->buildOrderBookInitial(wsConnectionPtr, exchangeSubscriptionId, delayMilliseconds);
+          this->buildOrderBookInitial(wsConnectionPtr, exchangeSubscriptionId, delayMilliseconds, recoveryGeneration);
         }
       }
-      this->marketDataMessageDataBufferByConnectionIdExchangeSubscriptionIdVersionIdMap[wsConnectionPtr->id][exchangeSubscriptionId][versionId] =
-          MarketDataMessage::ConvertDataToOwingData(marketDataMessage.data);
     }
+    return true;
   }
 
-  void buildOrderBookInitialOnFail(std::shared_ptr<WsConnection> wsConnectionPtr, const std::string& exchangeSubscriptionId, long delayMilliseconds) {
+  bool isOrderBookRecoveryGenerationCurrent(const std::string& connectionId, const std::string& exchangeSubscriptionId,
+                                            uint64_t recoveryGeneration) const {
+    auto connectionIt = this->orderBookRecoveryGenerationByConnectionIdExchangeSubscriptionIdMap.find(connectionId);
+    if (connectionIt == this->orderBookRecoveryGenerationByConnectionIdExchangeSubscriptionIdMap.end()) {
+      return false;
+    }
+    auto generationIt = connectionIt->second.find(exchangeSubscriptionId);
+    return generationIt != connectionIt->second.end() && generationIt->second == recoveryGeneration;
+  }
+
+  int64_t findOrderBookSnapshotBridge(int64_t snapshotVersionId, const std::map<int64_t, BufferedOrderBookUpdate>& buffer) const {
+    auto it = std::find_if(buffer.begin(), buffer.end(), [snapshotVersionId](const auto& item) {
+      return item.second.finalUpdateId >= snapshotVersionId;
+    });
+    return it != buffer.end() && it->second.firstUpdateId <= snapshotVersionId ? it->first : -1;
+  }
+
+  bool isOrderBookUpdateChainContiguous(int64_t bridgeVersionId, const std::map<int64_t, BufferedOrderBookUpdate>& buffer) const {
+    auto it = buffer.find(bridgeVersionId);
+    if (it == buffer.end()) {
+      return false;
+    }
+    int64_t previousFinalUpdateId = it->second.finalUpdateId;
+    for (++it; it != buffer.end(); ++it) {
+      if (it->second.previousFinalUpdateId != previousFinalUpdateId) {
+        return false;
+      }
+      previousFinalUpdateId = it->second.finalUpdateId;
+    }
+    return true;
+  }
+
+  void buildOrderBookInitialOnFail(std::shared_ptr<WsConnection> wsConnectionPtr, const std::string& exchangeSubscriptionId, long delayMilliseconds,
+                                   uint64_t recoveryGeneration) {
+    if (!this->isOrderBookRecoveryGenerationCurrent(wsConnectionPtr->id, exchangeSubscriptionId, recoveryGeneration)) {
+      return;
+    }
     CCAPI_LOGGER_ERROR("buildOrderBookInitialOnFail: wsConnectionPtr = " + toString(*wsConnectionPtr) + ", exchangeSubscriptionId = " + exchangeSubscriptionId +
                        ", delayMilliseconds = " + toString(delayMilliseconds));
     auto thisDelayMilliseconds = delayMilliseconds > 0 ? delayMilliseconds * 2 : 1000;
     TimerPtr timerPtr(new boost::asio::steady_timer(*this->serviceContextPtr->ioContextPtr, std::chrono::milliseconds(thisDelayMilliseconds)));
-    timerPtr->async_wait([wsConnectionPtr, exchangeSubscriptionId, thisDelayMilliseconds, that = this](ErrorCode const& ec) {
+    timerPtr->async_wait([wsConnectionPtr, exchangeSubscriptionId, thisDelayMilliseconds, recoveryGeneration, that = this](ErrorCode const& ec) {
       if (ec) {
-        that->onError(Event::Type::SUBSCRIPTION_STATUS, Message::Type::GENERIC_ERROR, ec, "timer");
+        if (ec != boost::asio::error::operation_aborted) {
+          that->onError(Event::Type::SUBSCRIPTION_STATUS, Message::Type::GENERIC_ERROR, ec, "timer");
+        }
       } else {
-        that->buildOrderBookInitial(wsConnectionPtr, exchangeSubscriptionId, thisDelayMilliseconds);
+        that->buildOrderBookInitial(wsConnectionPtr, exchangeSubscriptionId, thisDelayMilliseconds, recoveryGeneration);
       }
     });
     this->fetchMarketDepthInitialSnapshotTimerByConnectionIdExchangeSubscriptionIdMap[wsConnectionPtr->id][exchangeSubscriptionId] = timerPtr;
   }
 
-  void buildOrderBookInitial(std::shared_ptr<WsConnection> wsConnectionPtr, const std::string& exchangeSubscriptionId, long delayMilliseconds) {
+  void buildOrderBookInitial(std::shared_ptr<WsConnection> wsConnectionPtr, const std::string& exchangeSubscriptionId, long delayMilliseconds,
+                             uint64_t recoveryGeneration) {
+    if (!this->isOrderBookRecoveryGenerationCurrent(wsConnectionPtr->id, exchangeSubscriptionId, recoveryGeneration)) {
+      return;
+    }
+    auto channelConnectionIt = this->channelIdSymbolIdByConnectionIdExchangeSubscriptionIdMap.find(wsConnectionPtr->id);
+    if (channelConnectionIt == this->channelIdSymbolIdByConnectionIdExchangeSubscriptionIdMap.end()) {
+      return;
+    }
+    auto channelIt = channelConnectionIt->second.find(exchangeSubscriptionId);
+    if (channelIt == channelConnectionIt->second.end()) {
+      return;
+    }
     auto now = UtilTime::now();
     http::request<http::string_body> req;
-    std::string symbolId = this->channelIdSymbolIdByConnectionIdExchangeSubscriptionIdMap[wsConnectionPtr->id][exchangeSubscriptionId][CCAPI_SYMBOL_ID];
+    std::string symbolId = channelIt->second.at(CCAPI_SYMBOL_ID);
     auto credential = wsConnectionPtr->credential;
     if (credential.empty()) {
       credential = this->credentialDefault;
@@ -1484,11 +1596,25 @@ class MarketDataService : public Service {
     this->createFetchOrderBookInitialReq(req, symbolId, now, credential);
     this->sendRequest(
         req,
-        [wsConnectionPtr, exchangeSubscriptionId, delayMilliseconds, that = shared_from_base<MarketDataService>()](const beast::error_code& ec) {
-          that->buildOrderBookInitialOnFail(wsConnectionPtr, exchangeSubscriptionId, delayMilliseconds);
+        [wsConnectionPtr, exchangeSubscriptionId, delayMilliseconds, recoveryGeneration,
+         that = shared_from_base<MarketDataService>()](const beast::error_code& ec) {
+          if (that->isOrderBookRecoveryGenerationCurrent(wsConnectionPtr->id, exchangeSubscriptionId, recoveryGeneration)) {
+            that->buildOrderBookInitialOnFail(wsConnectionPtr, exchangeSubscriptionId, delayMilliseconds, recoveryGeneration);
+          }
         },
-        [wsConnectionPtr, exchangeSubscriptionId, delayMilliseconds,
+        [wsConnectionPtr, exchangeSubscriptionId, delayMilliseconds, recoveryGeneration,
          that = shared_from_base<MarketDataService>()](const http::response<http::string_body>& res) {
+          if (!that->isOrderBookRecoveryGenerationCurrent(wsConnectionPtr->id, exchangeSubscriptionId, recoveryGeneration)) {
+            return;
+          }
+          auto bufferConnectionIt = that->marketDataMessageDataBufferByConnectionIdExchangeSubscriptionIdVersionIdMap.find(wsConnectionPtr->id);
+          if (bufferConnectionIt == that->marketDataMessageDataBufferByConnectionIdExchangeSubscriptionIdVersionIdMap.end()) {
+            return;
+          }
+          auto bufferIt = bufferConnectionIt->second.find(exchangeSubscriptionId);
+          if (bufferIt == bufferConnectionIt->second.end() || bufferIt->second.empty()) {
+            return;
+          }
           auto timeReceived = UtilTime::now();
           int statusCode = res.result_int();
           boost::beast::string_view bodyView(res.body());
@@ -1497,22 +1623,42 @@ class MarketDataService : public Service {
               that->jsonDocumentAllocator.Clear();
               rj::Document document(&that->jsonDocumentAllocator);
               document.Parse<rj::kParseNumbersAsStringsFlag>(bodyView.data(), bodyView.size());
+              if (document.HasParseError() || !document.IsObject() || !document.HasMember("lastUpdateId") ||
+                  !document["lastUpdateId"].IsString() || !document.HasMember("bids") || !document["bids"].IsArray() ||
+                  !document.HasMember("asks") || !document["asks"].IsArray()) {
+                throw std::runtime_error("invalid initial order book snapshot response");
+              }
               int64_t versionId;
               that->extractOrderBookInitialVersionId(versionId, document);
-              if (versionId >= that->marketDataMessageDataBufferByConnectionIdExchangeSubscriptionIdVersionIdMap[wsConnectionPtr->id][exchangeSubscriptionId]
-                                   .begin()
-                                   ->first) {
-                const auto& channelId =
-                    that->channelIdSymbolIdByConnectionIdExchangeSubscriptionIdMap[wsConnectionPtr->id][exchangeSubscriptionId][CCAPI_CHANNEL_ID];
-                const auto& symbolId =
-                    that->channelIdSymbolIdByConnectionIdExchangeSubscriptionIdMap[wsConnectionPtr->id][exchangeSubscriptionId][CCAPI_SYMBOL_ID];
+              auto& buffer = bufferIt->second;
+              auto firstBufferedVersionId = buffer.begin()->first;
+              auto bridgeIt = buffer.end();
+              if (that->enableOrderBookUpdateRangeCheck) {
+                while (!buffer.empty() && buffer.begin()->second.finalUpdateId < versionId) {
+                  buffer.erase(buffer.begin());
+                }
+                auto bridgeVersionId = that->findOrderBookSnapshotBridge(versionId, buffer);
+                if (bridgeVersionId >= 0 && that->isOrderBookUpdateChainContiguous(bridgeVersionId, buffer)) {
+                  bridgeIt = buffer.find(bridgeVersionId);
+                }
+              } else if (versionId >= firstBufferedVersionId) {
+                bridgeIt = buffer.upper_bound(versionId);
+              }
+              if (bridgeIt != buffer.end()) {
+                auto channelConnectionIt = that->channelIdSymbolIdByConnectionIdExchangeSubscriptionIdMap.find(wsConnectionPtr->id);
+                if (channelConnectionIt == that->channelIdSymbolIdByConnectionIdExchangeSubscriptionIdMap.end()) {
+                  return;
+                }
+                auto channelIt = channelConnectionIt->second.find(exchangeSubscriptionId);
+                if (channelIt == channelConnectionIt->second.end()) {
+                  return;
+                }
+                const auto& channelId = channelIt->second.at(CCAPI_CHANNEL_ID);
+                const auto& symbolId = channelIt->second.at(CCAPI_SYMBOL_ID);
                 const auto& optionMap = that->optionMapByConnectionIdChannelIdSymbolIdMap[wsConnectionPtr->id][channelId][symbolId];
-                that->orderbookVersionIdByConnectionIdExchangeSubscriptionIdMap[wsConnectionPtr->id][exchangeSubscriptionId] = versionId;
                 const auto& correlationIdList = that->correlationIdListByConnectionIdChannelIdSymbolIdMap.at(wsConnectionPtr->id).at(channelId).at(symbolId);
-                std::map<Decimal, std::string>& snapshotBid = that->snapshotBidByConnectionIdChannelIdSymbolIdMap[wsConnectionPtr->id][channelId][symbolId];
-                std::map<Decimal, std::string>& snapshotAsk = that->snapshotAskByConnectionIdChannelIdSymbolIdMap[wsConnectionPtr->id][channelId][symbolId];
-                snapshotBid.clear();
-                snapshotAsk.clear();
+                std::map<Decimal, std::string> snapshotBid;
+                std::map<Decimal, std::string> snapshotAsk;
                 MarketDataMessage::TypeForData input;
                 that->extractOrderBookInitialData(input, document);
                 for (const auto& x : input) {
@@ -1534,15 +1680,11 @@ class MarketDataService : public Service {
                     }
                   }
                 }
-                // if (that->marketDataMessageDataBufferByConnectionIdExchangeSubscriptionIdVersionIdMap.at(wsConnectionPtr->id).find(exchangeSubscriptionId) !=
-                //     that->marketDataMessageDataBufferByConnectionIdExchangeSubscriptionIdVersionIdMap.at(wsConnectionPtr->id).end()) {
-                auto it = that->marketDataMessageDataBufferByConnectionIdExchangeSubscriptionIdVersionIdMap.at(wsConnectionPtr->id)
-                              .at(exchangeSubscriptionId)
-                              .upper_bound(versionId);
-                while (it != that->marketDataMessageDataBufferByConnectionIdExchangeSubscriptionIdVersionIdMap.at(wsConnectionPtr->id)
-                                 .at(exchangeSubscriptionId)
-                                 .end()) {
-                  const auto& input = it->second;
+                auto it = bridgeIt;
+                int64_t previousFinalUpdateId = versionId;
+                while (it != buffer.end()) {
+                  const auto& update = it->second;
+                  const auto& input = update.data;
                   for (const auto& x : input) {
                     const auto& type = x.first;
                     const auto& detail = x.second;
@@ -1562,11 +1704,13 @@ class MarketDataService : public Service {
                       }
                     }
                   }
-                  that->orderbookVersionIdByConnectionIdExchangeSubscriptionIdMap[wsConnectionPtr->id][exchangeSubscriptionId] = it->first;
+                  previousFinalUpdateId = update.finalUpdateId;
                   it++;
                 }
-                that->marketDataMessageDataBufferByConnectionIdExchangeSubscriptionIdVersionIdMap.at(wsConnectionPtr->id).erase(exchangeSubscriptionId);
-                // }
+                that->snapshotBidByConnectionIdChannelIdSymbolIdMap[wsConnectionPtr->id][channelId][symbolId] = snapshotBid;
+                that->snapshotAskByConnectionIdChannelIdSymbolIdMap[wsConnectionPtr->id][channelId][symbolId] = snapshotAsk;
+                that->orderbookVersionIdByConnectionIdExchangeSubscriptionIdMap[wsConnectionPtr->id][exchangeSubscriptionId] = previousFinalUpdateId;
+                bufferConnectionIt->second.erase(exchangeSubscriptionId);
                 Event event;
                 event.setType(Event::Type::SUBSCRIPTION_DATA);
                 std::vector<Element> elementList;
@@ -1616,29 +1760,14 @@ class MarketDataService : public Service {
                 that->eventHandler(event, nullptr);
                 that->processedInitialSnapshotByConnectionIdChannelIdSymbolIdMap[wsConnectionPtr->id][channelId][symbolId] = true;
               } else {
-                that->buildOrderBookInitialOnFail(wsConnectionPtr, exchangeSubscriptionId, delayMilliseconds);
-                // if (delayMilliseconds > 0) {
-                //   that->fetchMarketDepthInitialSnapshotTimerByConnectionIdExchangeSubscriptionIdMap[wsConnectionPtr->id][exchangeSubscriptionId] =
-                //       that->serviceContextPtr->tlsClientPtr->set_timer(
-                //           delayMilliseconds, [wsConnectionPtr, exchangeSubscriptionId, delayMilliseconds, that](ErrorCode const& ec) {
-                //             if (ec) {
-                //               that->onError(Event::Type::SUBSCRIPTION_STATUS, Message::Type::GENERIC_ERROR, ec, "timer");
-                //             } else {
-                //               that->buildOrderBookInitial(wsConnectionPtr, exchangeSubscriptionId, delayMilliseconds);
-                //             }
-                //           });
-                // } else {
-                //   that->buildOrderBookInitial(wsConnectionPtr, exchangeSubscriptionId, delayMilliseconds);
-                // }
+                that->buildOrderBookInitialOnFail(wsConnectionPtr, exchangeSubscriptionId, delayMilliseconds, recoveryGeneration);
               }
               return;
-            } catch (const std::runtime_error& e) {
+            } catch (const std::exception& e) {
               CCAPI_LOGGER_ERROR(std::string("e.what() = ") + e.what());
             }
           }
-          that->buildOrderBookInitialOnFail(wsConnectionPtr, exchangeSubscriptionId, delayMilliseconds);
-          // WsConnection thisWsConnection = wsConnection;
-          // that->onFail_(thisWsConnection);
+          that->buildOrderBookInitialOnFail(wsConnectionPtr, exchangeSubscriptionId, delayMilliseconds, recoveryGeneration);
         },
         this->sessionOptions.httpRequestTimeoutMilliseconds);
   }
@@ -1727,10 +1856,13 @@ class MarketDataService : public Service {
   std::map<std::string, std::map<int, std::vector<std::string>>> exchangeSubscriptionIdListByConnectionIdExchangeJsonPayloadIdMap;
   // only needed for generic public subscription
   std::map<std::string, std::string> correlationIdByConnectionIdMap;
-  std::map<std::string, std::map<std::string, std::map<int64_t, MarketDataMessage::TypeForOwingData>>>
+  std::map<std::string, std::map<std::string, std::map<int64_t, BufferedOrderBookUpdate>>>
       marketDataMessageDataBufferByConnectionIdExchangeSubscriptionIdVersionIdMap;
   std::map<std::string, std::map<std::string, int64_t>> orderbookVersionIdByConnectionIdExchangeSubscriptionIdMap;
   std::map<std::string, std::map<std::string, TimerPtr>> fetchMarketDepthInitialSnapshotTimerByConnectionIdExchangeSubscriptionIdMap;
+  std::map<std::string, std::map<std::string, uint64_t>> orderBookRecoveryGenerationByConnectionIdExchangeSubscriptionIdMap;
+  uint64_t nextOrderBookRecoveryGeneration{};
+  bool enableOrderBookUpdateRangeCheck{};
 };
 
 } /* namespace ccapi */

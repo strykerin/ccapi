@@ -196,6 +196,10 @@ class Service : public std::enable_shared_from_this<Service> {
   virtual void processSuccessfulTextMessageRest(int statusCode, const Request& request, boost::beast::string_view textMessageView,
                                                 const TimePoint& timeReceived, Queue<Event>* eventQueuePtr) {}
 
+  virtual bool shouldRetryRequest(const Request& request) const { return true; }
+
+  virtual Message::Type requestFailureMessageType(const Request& request) const { return Message::Type::REQUEST_FAILURE; }
+
   std::shared_ptr<std::future<void>> sendRequest(Request& request, const bool useFuture, const TimePoint& now, long delayMilliseconds,
                                                  Queue<Event>* eventQueuePtr) {
     CCAPI_LOGGER_FUNCTION_ENTER;
@@ -698,8 +702,14 @@ class Service : public std::enable_shared_from_this<Service> {
     boost::ignore_unused(bytes_transferred);
     if (ec) {
       CCAPI_LOGGER_TRACE("fail");
-      this->onError(Event::Type::REQUEST_STATUS, Message::Type::REQUEST_FAILURE, ec, "write", {request.getCorrelationId()}, eventQueuePtr);
+      this->onError(Event::Type::REQUEST_STATUS, this->requestFailureMessageType(request), ec, "write", {request.getCorrelationId()}, eventQueuePtr);
       this->httpConnectionPool[request.getLocalIpAddress()][request.getBaseUrl()].clear();
+      if (!this->shouldRetryRequest(request)) {
+        if (retry.promisePtr) {
+          retry.promisePtr->set_value();
+        }
+        return;
+      }
       auto now = UtilTime::now();
       auto req = this->convertRequest(request, now);
       retry.numRetry += 1;
@@ -727,8 +737,14 @@ class Service : public std::enable_shared_from_this<Service> {
     boost::ignore_unused(bytes_transferred);
     if (ec) {
       CCAPI_LOGGER_TRACE("fail");
-      this->onError(Event::Type::REQUEST_STATUS, Message::Type::REQUEST_FAILURE, ec, "read", {request.getCorrelationId()}, eventQueuePtr);
+      this->onError(Event::Type::REQUEST_STATUS, this->requestFailureMessageType(request), ec, "read", {request.getCorrelationId()}, eventQueuePtr);
       this->httpConnectionPool[request.getLocalIpAddress()][request.getBaseUrl()].clear();
+      if (!this->shouldRetryRequest(request)) {
+        if (retry.promisePtr) {
+          retry.promisePtr->set_value();
+        }
+        return;
+      }
       auto now = UtilTime::now();
       auto req = this->convertRequest(request, now);
       retry.numRetry += 1;
@@ -779,6 +795,14 @@ class Service : public std::enable_shared_from_this<Service> {
       } else if (statusCode / 100 == 4) {
         this->onResponseError(request, statusCode, bodyView, eventQueuePtr);
       } else if (statusCode / 100 == 5) {
+        if (!this->shouldRetryRequest(request)) {
+          this->onError(Event::Type::REQUEST_STATUS, this->requestFailureMessageType(request),
+                        "HTTP " + std::to_string(statusCode) + " returned an uncertain execution outcome", {request.getCorrelationId()}, eventQueuePtr);
+          if (retry.promisePtr) {
+            retry.promisePtr->set_value();
+          }
+          return;
+        }
         this->onResponseError(request, statusCode, bodyView, eventQueuePtr);
         retry.numRetry += 1;
         this->tryRequest(request, *reqPtr, retry, eventQueuePtr);

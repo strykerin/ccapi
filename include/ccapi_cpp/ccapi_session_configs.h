@@ -43,6 +43,10 @@ class SessionConfigs {
 
   void setUrlWebsocketBase(const std::map<std::string, std::string>& urlWebsocketBase) { this->urlWebsocketBase = urlWebsocketBase; }
 
+  void setUrlWebsocketOrderEntryBase(const std::map<std::string, std::string>& urlWebsocketOrderEntryBase) {
+    this->urlWebsocketOrderEntryBase = urlWebsocketOrderEntryBase;
+  }
+
   void setUrlRestBase(const std::map<std::string, std::string>& urlRestBase) { this->urlRestBase = urlRestBase; }
 
   void setUrlFixBase(const std::map<std::string, std::string>& urlFixBase) { this->urlFixBase = urlFixBase; }
@@ -98,10 +102,10 @@ class SessionConfigs {
         {CCAPI_CANDLESTICK, CCAPI_WEBSOCKET_BINANCE_BASE_CHANNEL_KLINE},
     };
     std::map<std::string, std::string> fieldWebsocketChannelMapBinanceUsdsFutures = {
-        {CCAPI_TRADE, CCAPI_WEBSOCKET_BINANCE_BASE_CHANNEL_TRADE},
         {CCAPI_AGG_TRADE, CCAPI_WEBSOCKET_BINANCE_BASE_CHANNEL_AGG_TRADE},
         {CCAPI_MARKET_DEPTH, CCAPI_WEBSOCKET_BINANCE_BASE_CHANNEL_PARTIAL_BOOK_DEPTH},
         {CCAPI_CANDLESTICK, CCAPI_WEBSOCKET_BINANCE_BASE_CHANNEL_KLINE},
+        {CCAPI_MARK_PRICE, CCAPI_WEBSOCKET_BINANCE_BASE_CHANNEL_MARK_PRICE},
     };
     std::map<std::string, std::string> fieldWebsocketChannelMapBinanceCoinFutures = {
         {CCAPI_AGG_TRADE, CCAPI_WEBSOCKET_BINANCE_BASE_CHANNEL_AGG_TRADE},

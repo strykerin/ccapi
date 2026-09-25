@@ -19,6 +19,7 @@ class MarketDataMessage {
     MARKET_DATA_EVENTS_TRADE,
     MARKET_DATA_EVENTS_AGG_TRADE,
     MARKET_DATA_EVENTS_CANDLESTICK,
+    MARKET_DATA_EVENTS_MARK_PRICE,
   };
   enum class RecapType {
     UNKNOWN,
@@ -49,6 +50,7 @@ class MarketDataMessage {
     TRADE = 2,
     AGG_TRADE = 3,
     CANDLESTICK = 4,
+    MARK_PRICE = 5,
   };
 
   static std::string dataTypeToString(DataType dataType) {
@@ -69,6 +71,9 @@ class MarketDataMessage {
       case DataType::CANDLESTICK:
         output = "CANDLESTICK";
         break;
+      case DataType::MARK_PRICE:
+        output = "MARK_PRICE";
+        break;
       default:
         CCAPI_LOGGER_FATAL(CCAPI_UNSUPPORTED_VALUE);
     }
@@ -87,6 +92,13 @@ class MarketDataMessage {
     CLOSE_PRICE = 9,
     VOLUME = 10,
     QUOTE_VOLUME = 11,
+    SYMBOL = 12,
+    MARK_PRICE = 13,
+    INDEX_PRICE = 14,
+    ESTIMATED_SETTLEMENT_PRICE = 15,
+    FUNDING_RATE = 16,
+    NEXT_FUNDING_TIME_MILLISECONDS = 17,
+    EVENT_TIME_MILLISECONDS = 18,
   };
 
   static std::string dataFieldTypeToString(DataFieldType dataFieldType) {
@@ -127,6 +139,27 @@ class MarketDataMessage {
         break;
       case DataFieldType::QUOTE_VOLUME:
         output = "QUOTE_VOLUME";
+        break;
+      case DataFieldType::SYMBOL:
+        output = "SYMBOL";
+        break;
+      case DataFieldType::MARK_PRICE:
+        output = "MARK_PRICE";
+        break;
+      case DataFieldType::INDEX_PRICE:
+        output = "INDEX_PRICE";
+        break;
+      case DataFieldType::ESTIMATED_SETTLEMENT_PRICE:
+        output = "ESTIMATED_SETTLEMENT_PRICE";
+        break;
+      case DataFieldType::FUNDING_RATE:
+        output = "FUNDING_RATE";
+        break;
+      case DataFieldType::NEXT_FUNDING_TIME_MILLISECONDS:
+        output = "NEXT_FUNDING_TIME_MILLISECONDS";
+        break;
+      case DataFieldType::EVENT_TIME_MILLISECONDS:
+        output = "EVENT_TIME_MILLISECONDS";
         break;
       default:
         CCAPI_LOGGER_FATAL(CCAPI_UNSUPPORTED_VALUE);

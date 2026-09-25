@@ -52,6 +52,16 @@ class MarketDataServiceBinanceDerivativesBase : public MarketDataServiceBinanceB
       std::string interval =
           this->convertCandlestickIntervalSecondsToInterval(std::stoi(optionMap.at(CCAPI_CANDLESTICK_INTERVAL_SECONDS)), "s", "m", "h", "d", "w");
       channelId = channelId + "_" + interval;
+    } else if (field == CCAPI_MARK_PRICE) {
+      auto it = optionMap.find(CCAPI_MARK_PRICE_UPDATE_SPEED_MILLISECONDS);
+      if (it != optionMap.end()) {
+        auto updateSpeedMilliseconds = std::stoi(it->second);
+        if (updateSpeedMilliseconds == 1000) {
+          channelId += "@1s";
+        } else if (updateSpeedMilliseconds != 3000) {
+          throw std::invalid_argument(std::string(CCAPI_MARK_PRICE_UPDATE_SPEED_MILLISECONDS) + " must be 1000 or 3000");
+        }
+      }
     }
   }
 

@@ -3,6 +3,9 @@
 #ifdef CCAPI_ENABLE_SERVICE_EXECUTION_MANAGEMENT
 #if defined(CCAPI_ENABLE_EXCHANGE_BINANCE_US) || defined(CCAPI_ENABLE_EXCHANGE_BINANCE) || defined(CCAPI_ENABLE_EXCHANGE_BINANCE_USDS_FUTURES) || \
     defined(CCAPI_ENABLE_EXCHANGE_BINANCE_COIN_FUTURES)
+#include <cstdint>
+#include <memory>
+
 #include "ccapi_cpp/service/ccapi_execution_management_service.h"
 
 namespace ccapi {
@@ -16,19 +19,100 @@ class ExecutionManagementServiceBinanceBase : public ExecutionManagementService 
     this->pingListenKeyIntervalSeconds = 600;
   }
 
-  virtual ~ExecutionManagementServiceBinanceBase() {}
+  virtual ~ExecutionManagementServiceBinanceBase() {
+    for (const auto& item : this->pingListenKeyTimerMapByConnectionIdMap) {
+      item.second->cancel();
+    }
+  }
 #ifndef CCAPI_EXPOSE_INTERNAL
 
  protected:
 #endif
+
+  enum class ConnectionRole { PRIVATE_LISTEN_KEY, ORDER_ENTRY };
 
   bool useWebsocketOrderEntryConnection(const std::set<std::string>& fieldSet) override {
     return fieldSet.find(CCAPI_EM_WEBSOCKET_ORDER_ENTRY) != fieldSet.end() || fieldSet.find(CCAPI_EM_ORDER_UPDATE) != fieldSet.end() ||
            fieldSet.find(CCAPI_EM_PRIVATE_TRADE) != fieldSet.end() || fieldSet.find(CCAPI_EM_BALANCE_UPDATE) != fieldSet.end();
   }
 
+  bool doesHttpBodyContainError(boost::beast::string_view bodyView) override {
+    rj::Document document;
+    document.Parse<rj::kParseNumbersAsStringsFlag>(bodyView.data(), bodyView.size());
+    if (document.HasParseError() || !document.IsObject()) {
+      return false;
+    }
+    auto codeIt = document.FindMember("code");
+    if (codeIt == document.MemberEnd() || codeIt->value.IsNull() || !codeIt->value.IsString()) {
+      return false;
+    }
+    try {
+      int code = std::stoi(codeIt->value.GetString());
+      return code != 0 && code != 200;
+    } catch (const std::exception&) {
+      return true;
+    }
+  }
+
+  bool isOrderEntryConnection(const std::shared_ptr<WsConnection>& wsConnectionPtr, const std::set<std::string>* fieldSetPtr = nullptr) const {
+    auto it = this->connectionRoleByConnectionIdMap.find(wsConnectionPtr->id);
+    if (it != this->connectionRoleByConnectionIdMap.end()) {
+      return it->second == ConnectionRole::ORDER_ENTRY;
+    }
+    if (fieldSetPtr) {
+      return const_cast<ExecutionManagementServiceBinanceBase*>(this)->useWebsocketOrderEntryConnection(*fieldSetPtr);
+    }
+    return false;
+  }
+
+  bool shouldRegisterWebsocketConnectionOnOpen(const std::shared_ptr<WsConnection>& wsConnectionPtr) override { return false; }
+
+  uint64_t beginConnectionGeneration(const std::shared_ptr<WsConnection>& wsConnectionPtr) {
+    auto generation = ++this->nextConnectionGeneration;
+    this->connectionGenerationByConnectionIdMap[wsConnectionPtr->id] = generation;
+    return generation;
+  }
+
+  bool isConnectionGenerationCurrent(const std::shared_ptr<WsConnection>& wsConnectionPtr, uint64_t generation) const {
+    auto it = this->connectionGenerationByConnectionIdMap.find(wsConnectionPtr->id);
+    return it != this->connectionGenerationByConnectionIdMap.end() && it->second == generation;
+  }
+
+  void cancelPingListenKeyTimer(const std::string& connectionId) {
+    auto it = this->pingListenKeyTimerMapByConnectionIdMap.find(connectionId);
+    if (it != this->pingListenKeyTimerMapByConnectionIdMap.end()) {
+      it->second->cancel();
+      this->pingListenKeyTimerMapByConnectionIdMap.erase(it);
+    }
+  }
+
+  std::string createListenKeyWebsocketUrl(const std::string& listenKey) const { return this->baseUrlWs + "/" + listenKey; }
+
+  void recoverListenKey(const std::shared_ptr<WsConnection>& wsConnectionPtr, const std::string& reason) {
+    this->cancelPingListenKeyTimer(wsConnectionPtr->id);
+    this->beginConnectionGeneration(wsConnectionPtr);
+    this->unregisterWebsocketConnectionForRequests(wsConnectionPtr);
+    this->onError(Event::Type::SUBSCRIPTION_STATUS, Message::Type::SUBSCRIPTION_FAILURE,
+                  "Binance listen key unavailable; account state must be reconciled: " + reason, wsConnectionPtr->correlationIdList);
+    if (wsConnectionPtr->status == WsConnection::Status::OPEN) {
+      ErrorCode ec;
+      this->close(wsConnectionPtr, beast::websocket::close_code::normal,
+                  beast::websocket::close_reason(beast::websocket::close_code::normal, "listen key recovery"), ec);
+      if (ec) {
+        this->onFail(wsConnectionPtr);
+      }
+    } else {
+      this->onFail(wsConnectionPtr);
+    }
+  }
+
   void prepareConnect(std::shared_ptr<WsConnection> wsConnectionPtr) override {
-    if (wsConnectionPtr->host == this->websocketOrderEntryHost) {
+    const auto& fieldSet = wsConnectionPtr->subscriptionList.at(0).getFieldSet();
+    bool orderEntry = this->useWebsocketOrderEntryConnection(fieldSet);
+    this->connectionRoleByConnectionIdMap[wsConnectionPtr->id] =
+        orderEntry ? ConnectionRole::ORDER_ENTRY : ConnectionRole::PRIVATE_LISTEN_KEY;
+    auto generation = this->beginConnectionGeneration(wsConnectionPtr);
+    if (orderEntry) {
       ExecutionManagementService::prepareConnect(wsConnectionPtr);
     } else {
       auto hostPort = this->extractHostFromUrl(this->baseUrlRest);
@@ -58,29 +142,32 @@ class ExecutionManagementServiceBinanceBase : public ExecutionManagementService 
       req.set("X-MBX-APIKEY", apiKey);
       this->sendRequest(
           req,
-          [wsConnectionPtr, that = shared_from_base<ExecutionManagementServiceBinanceBase>()](const beast::error_code& ec) { that->onFail_(wsConnectionPtr); },
-          [wsConnectionPtr, that = shared_from_base<ExecutionManagementServiceBinanceBase>()](const http::response<http::string_body>& res) {
+          [wsConnectionPtr, generation, that = shared_from_base<ExecutionManagementServiceBinanceBase>()](const beast::error_code& ec) {
+            if (that->isConnectionGenerationCurrent(wsConnectionPtr, generation)) {
+              that->recoverListenKey(wsConnectionPtr, "listen-key creation transport failure: " + ec.message());
+            }
+          },
+          [wsConnectionPtr, generation, that = shared_from_base<ExecutionManagementServiceBinanceBase>()](const http::response<http::string_body>& res) {
+            if (!that->isConnectionGenerationCurrent(wsConnectionPtr, generation)) {
+              return;
+            }
             int statusCode = res.result_int();
             std::string body = res.body();
-            if (statusCode / 100 == 2) {
-              std::string urlWebsocketBase;
-              try {
-                that->jsonDocumentAllocator.Clear();
-                rj::Document document(&that->jsonDocumentAllocator);
-                document.Parse<rj::kParseNumbersAsStringsFlag>(body.c_str());
+            if (statusCode / 100 == 2 && !that->doesHttpBodyContainError(body)) {
+              that->jsonDocumentAllocator.Clear();
+              rj::Document document(&that->jsonDocumentAllocator);
+              document.Parse<rj::kParseNumbersAsStringsFlag>(body.c_str());
+              if (!document.HasParseError() && document.IsObject() && document.HasMember("listenKey") && document["listenKey"].IsString()) {
                 std::string listenKey = document["listenKey"].GetString();
-                std::string url = that->baseUrlWs + "/" + listenKey;
+                std::string url = that->createListenKeyWebsocketUrl(listenKey);
                 wsConnectionPtr->setUrl(url);
+                that->extraPropertyByConnectionIdMap[wsConnectionPtr->id]["listenKey"] = listenKey;
                 that->connect(wsConnectionPtr);
-                that->extraPropertyByConnectionIdMap[wsConnectionPtr->id].insert({
-                    {"listenKey", listenKey},
-                });
                 return;
-              } catch (const std::runtime_error& e) {
-                CCAPI_LOGGER_ERROR(std::string("e.what() = ") + e.what());
               }
             }
-            that->onFail_(wsConnectionPtr);
+            that->recoverListenKey(wsConnectionPtr,
+                                   "listen-key creation failed with HTTP " + std::to_string(statusCode) + ": " + body);
           },
           this->sessionOptions.httpRequestTimeoutMilliseconds);
     }
@@ -88,7 +175,7 @@ class ExecutionManagementServiceBinanceBase : public ExecutionManagementService 
 
   void onOpen(std::shared_ptr<WsConnection> wsConnectionPtr) override {
     ExecutionManagementService::onOpen(wsConnectionPtr);
-    if (wsConnectionPtr->host != this->websocketOrderEntryHost) {
+    if (!this->isOrderEntryConnection(wsConnectionPtr)) {
       auto now = UtilTime::now();
       Event event;
       event.setType(Event::Type::SUBSCRIPTION_STATUS);
@@ -103,13 +190,21 @@ class ExecutionManagementServiceBinanceBase : public ExecutionManagementService 
   }
 
   void setPingListenKeyTimer(const std::shared_ptr<WsConnection> wsConnectionPtr) {
+    this->cancelPingListenKeyTimer(wsConnectionPtr->id);
+    auto generationIt = this->connectionGenerationByConnectionIdMap.find(wsConnectionPtr->id);
+    if (generationIt == this->connectionGenerationByConnectionIdMap.end()) {
+      return;
+    }
+    auto generation = generationIt->second;
     TimerPtr timerPtr(
         new boost::asio::steady_timer(*this->serviceContextPtr->ioContextPtr, std::chrono::milliseconds(this->pingListenKeyIntervalSeconds * 1000)));
-    timerPtr->async_wait([wsConnectionPtr, that = shared_from_base<ExecutionManagementServiceBinanceBase>()](ErrorCode const& ec) {
+    timerPtr->async_wait([wsConnectionPtr, generation, that = shared_from_base<ExecutionManagementServiceBinanceBase>()](ErrorCode const& ec) {
       if (ec) {
         return;
       }
-      that->setPingListenKeyTimer(wsConnectionPtr);
+      if (!that->isConnectionGenerationCurrent(wsConnectionPtr, generation)) {
+        return;
+      }
       http::request<http::string_body> req;
       req.set(http::field::host, that->hostRest);
       req.set(http::field::user_agent, BOOST_BEAST_VERSION_STRING);
@@ -123,7 +218,12 @@ class ExecutionManagementServiceBinanceBase : public ExecutionManagementService 
       }
       if (!that->isDerivatives) {
         std::map<std::string, std::string> params;
-        auto listenKey = that->extraPropertyByConnectionIdMap.at(wsConnectionPtr->id).at("listenKey");
+        auto connectionIt = that->extraPropertyByConnectionIdMap.find(wsConnectionPtr->id);
+        if (connectionIt == that->extraPropertyByConnectionIdMap.end() || connectionIt->second.find("listenKey") == connectionIt->second.end()) {
+          that->recoverListenKey(wsConnectionPtr, "listen key missing during keepalive");
+          return;
+        }
+        auto listenKey = connectionIt->second.at("listenKey");
         params.insert({"listenKey", listenKey});
         if (marginType == CCAPI_EM_MARGIN_TYPE_ISOLATED_MARGIN) {
           auto symbol = wsConnectionPtr->subscriptionList.at(0).getInstrument();
@@ -144,12 +244,22 @@ class ExecutionManagementServiceBinanceBase : public ExecutionManagementService 
       req.set("X-MBX-APIKEY", apiKey);
       that->sendRequest(
           req,
-          [wsConnectionPtr, that_2 = that->shared_from_base<ExecutionManagementServiceBinanceBase>()](const beast::error_code& ec) {
-            CCAPI_LOGGER_ERROR("ping listen key fail");
-            that_2->onError(Event::Type::SUBSCRIPTION_STATUS, Message::Type::GENERIC_ERROR, ec, "ping listen key");
+          [wsConnectionPtr, generation, that_2 = that->shared_from_base<ExecutionManagementServiceBinanceBase>()](const beast::error_code& ec) {
+            if (that_2->isConnectionGenerationCurrent(wsConnectionPtr, generation)) {
+              that_2->recoverListenKey(wsConnectionPtr, "listen-key keepalive transport failure: " + ec.message());
+            }
           },
-          [wsConnectionPtr, that_2 = that->shared_from_base<ExecutionManagementServiceBinanceBase>()](const http::response<http::string_body>& res) {
+          [wsConnectionPtr, generation, that_2 = that->shared_from_base<ExecutionManagementServiceBinanceBase>()](const http::response<http::string_body>& res) {
+            if (!that_2->isConnectionGenerationCurrent(wsConnectionPtr, generation)) {
+              return;
+            }
+            if (res.result_int() / 100 != 2 || that_2->doesHttpBodyContainError(res.body())) {
+              that_2->recoverListenKey(wsConnectionPtr,
+                                       "listen-key keepalive failed with HTTP " + std::to_string(res.result_int()) + ": " + res.body());
+              return;
+            }
             CCAPI_LOGGER_DEBUG("ping listen key success");
+            that_2->setPingListenKeyTimer(wsConnectionPtr);
           },
           that->sessionOptions.httpRequestTimeoutMilliseconds);
     });
@@ -157,11 +267,14 @@ class ExecutionManagementServiceBinanceBase : public ExecutionManagementService 
   }
 
   void onClose(std::shared_ptr<WsConnection> wsConnectionPtr, ErrorCode ec) override {
-    if (this->pingListenKeyTimerMapByConnectionIdMap.find(wsConnectionPtr->id) != this->pingListenKeyTimerMapByConnectionIdMap.end()) {
-      this->pingListenKeyTimerMapByConnectionIdMap.at(wsConnectionPtr->id)->cancel();
-      this->pingListenKeyTimerMapByConnectionIdMap.erase(wsConnectionPtr->id);
-    }
+    this->cancelPingListenKeyTimer(wsConnectionPtr->id);
     ExecutionManagementService::onClose(wsConnectionPtr, ec);
+  }
+
+  void clearStates(std::shared_ptr<WsConnection> wsConnectionPtr) override {
+    this->cancelPingListenKeyTimer(wsConnectionPtr->id);
+    this->beginConnectionGeneration(wsConnectionPtr);
+    ExecutionManagementService::clearStates(wsConnectionPtr);
   }
 
   void signReqeustForRestGenericPrivateRequest(http::request<http::string_body>& req, const Request& request, std::string& methodString,
@@ -288,11 +401,12 @@ class ExecutionManagementServiceBinanceBase : public ExecutionManagementService 
       case Request::Operation::GET_OPEN_ORDERS: {
         req.method(http::verb::get);
         std::string queryString;
-        this->appendParam(queryString, {});
+        const std::map<std::string, std::string> param = request.getFirstParamWithDefault();
+        this->appendParam(queryString, param);
         if (!symbolId.empty()) {
           this->appendSymbolId(queryString, symbolId);
         }
-        this->signRequest(queryString, {}, now, credential);
+        this->signRequest(queryString, param, now, credential);
         req.target((request.getMarginType() == CCAPI_EM_MARGIN_TYPE_CROSS_MARGIN || request.getMarginType() == CCAPI_EM_MARGIN_TYPE_ISOLATED_MARGIN
                         ? this->getOpenOrdersMarginTarget
                         : this->getOpenOrdersTarget) +
@@ -301,9 +415,10 @@ class ExecutionManagementServiceBinanceBase : public ExecutionManagementService 
       case Request::Operation::CANCEL_OPEN_ORDERS: {
         req.method(http::verb::delete_);
         std::string queryString;
-        this->appendParam(queryString, {});
+        const std::map<std::string, std::string> param = request.getFirstParamWithDefault();
+        this->appendParam(queryString, param);
         this->appendSymbolId(queryString, symbolId);
-        this->signRequest(queryString, {}, now, credential);
+        this->signRequest(queryString, param, now, credential);
         req.target((request.getMarginType() == CCAPI_EM_MARGIN_TYPE_CROSS_MARGIN || request.getMarginType() == CCAPI_EM_MARGIN_TYPE_ISOLATED_MARGIN
                         ? this->cancelOpenOrdersMarginTarget
                         : this->cancelOpenOrdersTarget) +
@@ -313,11 +428,6 @@ class ExecutionManagementServiceBinanceBase : public ExecutionManagementService 
         req.method(http::verb::get);
         std::string queryString;
         this->appendParam(queryString, {});
-        if (!symbolId.empty()) {
-          queryString += "symbols=";
-          queryString += Url::urlEncode(symbolId);
-          queryString += "&";
-        }
         this->signRequest(queryString, {}, now, credential);
         const auto& marginType = request.getMarginType();
         std::string target = this->getAccountBalancesTarget;
@@ -346,10 +456,17 @@ class ExecutionManagementServiceBinanceBase : public ExecutionManagementService 
         {CCAPI_EM_ORDER_INSTRUMENT, std::make_pair("symbol", JsonDataType::STRING)},
         {CCAPI_LAST_UPDATED_TIME_SECONDS, std::make_pair("updateTime", JsonDataType::STRING)},
     };
-    if (operation == Request::Operation::CANCEL_ORDER || operation == Request::Operation::CANCEL_OPEN_ORDERS) {
-      extractionFieldNameMap.emplace(CCAPI_EM_CLIENT_ORDER_ID, std::make_pair("origClientOrderId", JsonDataType::STRING));
-    } else {
-      extractionFieldNameMap.emplace(CCAPI_EM_CLIENT_ORDER_ID, std::make_pair("clientOrderId", JsonDataType::STRING));
+    extractionFieldNameMap.emplace(CCAPI_EM_CLIENT_ORDER_ID, std::make_pair("clientOrderId", JsonDataType::STRING));
+    if (operation == Request::Operation::CANCEL_OPEN_ORDERS && document.IsObject() && document.HasMember("code") && document.HasMember("msg")) {
+      Element element;
+      if (document["code"].IsString()) {
+        element.insert(CCAPI_HTTP_STATUS_CODE, document["code"].GetString());
+      }
+      if (document["msg"].IsString()) {
+        element.insert(CCAPI_INFO_MESSAGE, document["msg"].GetString());
+      }
+      elementList.emplace_back(std::move(element));
+      return;
     }
     if (document.IsObject()) {
       Element element;
@@ -358,6 +475,12 @@ class ExecutionManagementServiceBinanceBase : public ExecutionManagementService 
           {
               {CCAPI_LAST_UPDATED_TIME_SECONDS, [](const std::string& input) { return UtilTime::convertMillisecondsStrToSecondsStr(input); }},
           });
+      if (element.getValue(CCAPI_EM_CLIENT_ORDER_ID).empty()) {
+        auto it = document.FindMember("origClientOrderId");
+        if (it != document.MemberEnd() && it->value.IsString()) {
+          element.insert_or_assign(CCAPI_EM_CLIENT_ORDER_ID, it->value.GetString());
+        }
+      }
       elementList.emplace_back(std::move(element));
     } else {
       for (const auto& x : document.GetArray()) {
@@ -367,6 +490,12 @@ class ExecutionManagementServiceBinanceBase : public ExecutionManagementService 
             {
                 {CCAPI_LAST_UPDATED_TIME_SECONDS, [](const std::string& input) { return UtilTime::convertMillisecondsStrToSecondsStr(input); }},
             });
+        if (element.getValue(CCAPI_EM_CLIENT_ORDER_ID).empty()) {
+          auto it = x.FindMember("origClientOrderId");
+          if (it != x.MemberEnd() && it->value.IsString()) {
+            element.insert_or_assign(CCAPI_EM_CLIENT_ORDER_ID, it->value.GetString());
+          }
+        }
         elementList.emplace_back(std::move(element));
       }
     }
@@ -470,20 +599,75 @@ class ExecutionManagementServiceBinanceBase : public ExecutionManagementService 
                     const rj::Document& document, const TimePoint& timeReceived) {
     Event event;
     std::vector<Message> messageList;
-    if (wsConnectionPtr->host == this->websocketOrderEntryHost) {
-      if (document.HasMember("event")) {
+    const auto& fieldSet = subscription.getFieldSet();
+    if (!document.IsObject()) {
+      event.setType(Event::Type::SUBSCRIPTION_STATUS);
+      Message message;
+      message.setTimeReceived(timeReceived);
+      message.setType(Message::Type::SUBSCRIPTION_FAILURE);
+      message.setCorrelationIdList({subscription.getCorrelationId()});
+      Element element;
+      element.insert(CCAPI_ERROR_MESSAGE, "malformed Binance websocket payload");
+      message.setElementList({element});
+      messageList.emplace_back(std::move(message));
+    } else if (this->isOrderEntryConnection(wsConnectionPtr, &fieldSet)) {
+      if (document.HasMember("event") && document["event"].IsObject()) {
         // unsolicited user-data event delivered on the ws-api connection (wrapped as {"subscriptionId":<int>,"event":{...}})
-        this->appendUserDataMessages(event, messageList, subscription, document["event"], timeReceived);
+        this->appendUserDataMessages(wsConnectionPtr, event, messageList, subscription, document["event"], timeReceived);
       } else {
-        // request/response frame: has id + status, no event wrapper
+        auto statusIt = document.FindMember("status");
+        int statusCode{};
+        bool validStatus = false;
+        if (statusIt != document.MemberEnd() && statusIt->value.IsString()) {
+          try {
+            statusCode = std::stoi(statusIt->value.GetString());
+            validStatus = true;
+          } catch (const std::exception&) {
+          }
+        }
+        if (!validStatus) {
+          event.setType(Event::Type::SUBSCRIPTION_STATUS);
+          Message message;
+          message.setTimeReceived(timeReceived);
+          message.setCorrelationIdList({subscription.getCorrelationId()});
+          message.setType(Message::Type::SUBSCRIPTION_FAILURE);
+          Element element;
+          element.insert(CCAPI_ERROR_MESSAGE, "Binance websocket response is missing a valid status");
+          message.setElementList({element});
+          messageList.emplace_back(std::move(message));
+          event.setMessageList(messageList);
+          return event;
+        }
+        auto idIt = document.FindMember("id");
+        bool idIsNull = idIt != document.MemberEnd() && idIt->value.IsNull();
+        std::string id = idIt != document.MemberEnd() && idIt->value.IsString() ? idIt->value.GetString() : "";
+        bool success = statusCode / 100 == 2;
+        if (statusCode == 401 && (idIsNull || id.empty())) {
+          this->unregisterWebsocketConnectionForRequests(wsConnectionPtr);
+          event.setType(Event::Type::AUTHORIZATION_STATUS);
+          Message message;
+          message.setTimeReceived(timeReceived);
+          message.setCorrelationIdList({subscription.getCorrelationId()});
+          message.setType(Message::Type::AUTHORIZATION_FAILURE);
+          Element element;
+          element.insert(CCAPI_CONNECTION_ID, wsConnectionPtr->id);
+          element.insert(CCAPI_CONNECTION_URL, wsConnectionPtr->url);
+          element.insert(CCAPI_ERROR_MESSAGE, textMessageView);
+          message.setElementList({element});
+          messageList.emplace_back(std::move(message));
+          event.setMessageList(messageList);
+          return event;
+        }
+        if (id.empty()) {
+          event.setMessageList(messageList);
+          return event;
+        }
         Message message;
         message.setTimeReceived(timeReceived);
         message.setCorrelationIdList({subscription.getCorrelationId()});
-        std::string id = document["id"].GetString();
-        int statusCode = std::stoi(document["status"].GetString());
-        bool success = statusCode / 100 == 2;
         if (id == this->websocketOrderEntrySessionLogonJsonId) {
           if (success) {
+            this->registerWebsocketConnectionForRequests(wsConnectionPtr);
             event.setType(Event::Type::AUTHORIZATION_STATUS);
             message.setType(Message::Type::AUTHORIZATION_SUCCESS);
             Element element;
@@ -493,8 +677,10 @@ class ExecutionManagementServiceBinanceBase : public ExecutionManagementService 
             message.setElementList({element});
             // the session is now authenticated; subscribe to the user data stream so account events flow on this same socket
             const auto& fieldSet = subscription.getFieldSet();
-            if (fieldSet.find(CCAPI_EM_ORDER_UPDATE) != fieldSet.end() || fieldSet.find(CCAPI_EM_PRIVATE_TRADE) != fieldSet.end() ||
-                fieldSet.find(CCAPI_EM_BALANCE_UPDATE) != fieldSet.end()) {
+            if (this->supportsWebsocketUserDataStreamSubscription() &&
+                (fieldSet.find(CCAPI_EM_ORDER_UPDATE) != fieldSet.end() || fieldSet.find(CCAPI_EM_PRIVATE_TRADE) != fieldSet.end() ||
+                 fieldSet.find(CCAPI_EM_PRIVATE_TRADE_LITE) != fieldSet.end() || fieldSet.find(CCAPI_EM_BALANCE_UPDATE) != fieldSet.end() ||
+                 fieldSet.find(CCAPI_EM_POSITION_UPDATE) != fieldSet.end())) {
               std::string sub = R"({"id":")" + this->websocketUserDataStreamSubscribeJsonId + R"(","method":"userDataStream.subscribe"})";
               ErrorCode ec;
               this->send(wsConnectionPtr, sub, ec);
@@ -503,6 +689,7 @@ class ExecutionManagementServiceBinanceBase : public ExecutionManagementService 
               }
             }
           } else {
+            this->unregisterWebsocketConnectionForRequests(wsConnectionPtr);
             event.setType(Event::Type::AUTHORIZATION_STATUS);
             message.setType(Message::Type::AUTHORIZATION_FAILURE);
             Element element;
@@ -528,10 +715,27 @@ class ExecutionManagementServiceBinanceBase : public ExecutionManagementService 
           } else {
             wsRequestIdStr = std::string_view(id).substr(this->websocketOrderEntryCancelOrderJsonIdPrefix.size());
           }
-          unsigned long wsRequestId = std::stoul(std::string(wsRequestIdStr));
-          const auto& requestCorrelationId = this->requestCorrelationIdByWsRequestIdByConnectionIdMap.at(wsConnectionPtr->id).at(wsRequestId);
+          unsigned long wsRequestId{};
+          try {
+            wsRequestId = std::stoul(std::string(wsRequestIdStr));
+          } catch (const std::exception&) {
+            event.setMessageList(messageList);
+            return event;
+          }
+          auto connectionIt = this->requestCorrelationIdByWsRequestIdByConnectionIdMap.find(wsConnectionPtr->id);
+          if (connectionIt == this->requestCorrelationIdByWsRequestIdByConnectionIdMap.end()) {
+            event.setMessageList(messageList);
+            return event;
+          }
+          auto requestIt = connectionIt->second.find(wsRequestId);
+          if (requestIt == connectionIt->second.end()) {
+            event.setMessageList(messageList);
+            return event;
+          }
+          auto requestCorrelationId = requestIt->second;
+          connectionIt->second.erase(requestIt);
           event.setType(Event::Type::RESPONSE);
-          if (!success) {
+          if (!success || !document.HasMember("result") || !document["result"].IsObject()) {
             message.setType(Message::Type::RESPONSE_ERROR);
             Element element;
             element.insert(CCAPI_ERROR_MESSAGE, textMessageView);
@@ -549,24 +753,50 @@ class ExecutionManagementServiceBinanceBase : public ExecutionManagementService 
             message.setCorrelationIdList({requestCorrelationId});
           }
           messageList.emplace_back(std::move(message));
-        } else {
-          messageList.emplace_back(std::move(message));
         }
       }
     } else {
       // legacy listenKey path (still used by other Binance variants): the whole document is the event payload
-      this->appendUserDataMessages(event, messageList, subscription, document, timeReceived);
+      this->appendUserDataMessages(wsConnectionPtr, event, messageList, subscription, document, timeReceived);
     }
     event.setMessageList(messageList);
     return event;
   }
 
-  void appendUserDataMessages(Event& event, std::vector<Message>& messageList, const Subscription& subscription, const rj::Value& eventData,
-                              const TimePoint& timeReceived) {
+  bool supportsWebsocketUserDataStreamSubscription() const { return !this->isDerivatives; }
+
+  void appendUserDataMessages(const std::shared_ptr<WsConnection>& wsConnectionPtr, Event& event, std::vector<Message>& messageList,
+                              const Subscription& subscription, const rj::Value& eventData, const TimePoint& timeReceived) {
     const auto& fieldSet = subscription.getFieldSet();
     const auto& instrumentSet = subscription.getInstrumentSet();
+    if (!eventData.IsObject() || !eventData.HasMember("e") || !eventData["e"].IsString()) {
+      return;
+    }
+    auto insertStringIfPresent = [](Element& element, const rj::Value& value, const char* memberName, const char* elementName) {
+      auto it = value.FindMember(memberName);
+      if (it != value.MemberEnd() && !it->value.IsNull() && it->value.IsString()) {
+        element.insert(elementName, it->value.GetString());
+      }
+    };
+    auto insertBoolIfPresent = [](Element& element, const rj::Value& value, const char* memberName, const char* elementName) {
+      auto it = value.FindMember(memberName);
+      if (it != value.MemberEnd() && !it->value.IsNull() && it->value.IsBool()) {
+        element.insert(elementName, it->value.GetBool() ? "1" : "0");
+      }
+    };
+    auto insertEventTimes = [&insertStringIfPresent](Element& element, const rj::Value& outer, const rj::Value* order = nullptr) {
+      insertStringIfPresent(element, outer, "E", CCAPI_EVENT_TIME_MILLISECONDS);
+      if (order && order->IsObject() && order->HasMember("T")) {
+        insertStringIfPresent(element, *order, "T", CCAPI_TRANSACTION_TIME_MILLISECONDS);
+      } else {
+        insertStringIfPresent(element, outer, "T", CCAPI_TRANSACTION_TIME_MILLISECONDS);
+      }
+    };
     std::string type = eventData["e"].GetString();
-    if (type == "TRADE_LITE") {
+    if (type == "listenKeyExpired") {
+      this->recoverListenKey(wsConnectionPtr, "listenKeyExpired event");
+      return;
+    } else if (type == "TRADE_LITE") {
       event.setType(Event::Type::SUBSCRIPTION_DATA);
       const rj::Value& data = eventData;
       std::string instrument = data["s"].GetString();
@@ -588,6 +818,13 @@ class ExecutionManagementServiceBinanceBase : public ExecutionManagementService 
           element.insert(CCAPI_EM_ORDER_ID, data["i"].GetString());
           element.insert(CCAPI_EM_CLIENT_ORDER_ID, data["c"].GetString());
           element.insert(CCAPI_EM_ORDER_INSTRUMENT, instrument);
+          insertStringIfPresent(element, data, "n", CCAPI_EM_ORDER_FEE_QUANTITY);
+          insertStringIfPresent(element, data, "N", CCAPI_EM_ORDER_FEE_ASSET);
+          insertStringIfPresent(element, data, "rp", CCAPI_EM_ORDER_REALIZED_PNL);
+          insertBoolIfPresent(element, data, "R", CCAPI_EM_ORDER_REDUCE_ONLY);
+          insertStringIfPresent(element, data, "ps", CCAPI_EM_POSITION_SIDE);
+          insertStringIfPresent(element, data, "x", CCAPI_EM_ORDER_EXECUTION_TYPE);
+          insertEventTimes(element, eventData, &data);
           elementList.emplace_back(std::move(element));
           message.setElementList(elementList);
           messageList.emplace_back(std::move(message));
@@ -614,14 +851,8 @@ class ExecutionManagementServiceBinanceBase : public ExecutionManagementService 
           element.insert(CCAPI_EM_ORDER_SIDE, std::string_view(data["S"].GetString()) == "BUY" ? CCAPI_EM_ORDER_SIDE_BUY : CCAPI_EM_ORDER_SIDE_SELL);
           element.insert(CCAPI_IS_MAKER, data["m"].GetBool() ? "1" : "0");
           element.insert(CCAPI_EM_ORDER_ID, data["i"].GetString());
-          {
-            auto it = data.FindMember("C");
-            if (it != data.MemberEnd() && !it->value.IsNull() && it->value.GetStringLength()) {
-              element.insert(CCAPI_EM_CLIENT_ORDER_ID, std::string(it->value.GetString()));
-            } else {
-              element.insert(CCAPI_EM_CLIENT_ORDER_ID, data["c"].GetString());
-            }
-          }
+          insertStringIfPresent(element, data, "c", CCAPI_EM_CLIENT_ORDER_ID);
+          insertStringIfPresent(element, data, "C", CCAPI_EM_ORIGINAL_CLIENT_ORDER_ID);
           element.insert(CCAPI_EM_ORDER_INSTRUMENT, instrument);
           {
             auto it = data.FindMember("n");
@@ -629,6 +860,11 @@ class ExecutionManagementServiceBinanceBase : public ExecutionManagementService 
               element.insert(CCAPI_EM_ORDER_FEE_QUANTITY, it->value.GetString());
             }
           }
+          insertStringIfPresent(element, data, "rp", CCAPI_EM_ORDER_REALIZED_PNL);
+          insertBoolIfPresent(element, data, "R", CCAPI_EM_ORDER_REDUCE_ONLY);
+          insertStringIfPresent(element, data, "ps", CCAPI_EM_POSITION_SIDE);
+          insertStringIfPresent(element, data, "x", CCAPI_EM_ORDER_EXECUTION_TYPE);
+          insertEventTimes(element, eventData, &data);
           {
             auto it = data.FindMember("N");
             if (it != data.MemberEnd() && !it->value.IsNull()) {
@@ -647,12 +883,18 @@ class ExecutionManagementServiceBinanceBase : public ExecutionManagementService 
           message.setType(Message::Type::EXECUTION_MANAGEMENT_EVENTS_ORDER_UPDATE);
           const std::map<std::string_view, std::pair<std::string_view, JsonDataType>>& extractionFieldNameMap = {
               {CCAPI_EM_ORDER_ID, std::make_pair("i", JsonDataType::INTEGER)},
-              {CCAPI_EM_CLIENT_ORDER_ID, std::make_pair("C", JsonDataType::STRING)},
+              {CCAPI_EM_CLIENT_ORDER_ID, std::make_pair("c", JsonDataType::STRING)},
+              {CCAPI_EM_ORIGINAL_CLIENT_ORDER_ID, std::make_pair("C", JsonDataType::STRING)},
               {CCAPI_EM_ORDER_SIDE, std::make_pair("S", JsonDataType::STRING)},
               {CCAPI_EM_ORDER_LIMIT_PRICE, std::make_pair("p", JsonDataType::STRING)},
               {CCAPI_EM_ORDER_QUANTITY, std::make_pair("q", JsonDataType::STRING)},
               {CCAPI_EM_ORDER_CUMULATIVE_FILLED_QUANTITY, std::make_pair("z", JsonDataType::STRING)},
               {CCAPI_EM_ORDER_CUMULATIVE_FILLED_QUOTE_QUANTITY, std::make_pair("Z", JsonDataType::STRING)},
+              {CCAPI_EM_ORDER_AVERAGE_FILLED_PRICE, std::make_pair("ap", JsonDataType::STRING)},
+              {CCAPI_EM_ORDER_REALIZED_PNL, std::make_pair("rp", JsonDataType::STRING)},
+              {CCAPI_EM_ORDER_REDUCE_ONLY, std::make_pair("R", JsonDataType::BOOLEAN)},
+              {CCAPI_EM_POSITION_SIDE, std::make_pair("ps", JsonDataType::STRING)},
+              {CCAPI_EM_ORDER_EXECUTION_TYPE, std::make_pair("x", JsonDataType::STRING)},
               {CCAPI_EM_ORDER_STATUS, std::make_pair("X", JsonDataType::STRING)},
               {CCAPI_EM_ORDER_INSTRUMENT, std::make_pair("s", JsonDataType::STRING)},
           };
@@ -664,14 +906,7 @@ class ExecutionManagementServiceBinanceBase : public ExecutionManagementService 
               info.insert_or_assign(CCAPI_EM_CLIENT_ORDER_ID, std::string(it->value.GetString()));
             }
           }
-          {
-            auto it = data.FindMember("ap");
-            if (it != data.MemberEnd() && !it->value.IsNull()) {
-              info.insert(
-                  CCAPI_EM_ORDER_CUMULATIVE_FILLED_QUOTE_QUANTITY,
-                  ConvertDecimalToString(Decimal(UtilString::printDoubleScientific(std::stod(it->value.GetString()) * std::stod(data["z"].GetString())))));
-            }
-          }
+          insertEventTimes(info, eventData, &data);
           std::vector<Element> elementList;
           elementList.emplace_back(std::move(info));
           message.setElementList(elementList);
@@ -680,42 +915,117 @@ class ExecutionManagementServiceBinanceBase : public ExecutionManagementService 
       }
     } else if (this->isDerivatives && type == "ACCOUNT_UPDATE") {
       event.setType(Event::Type::SUBSCRIPTION_DATA);
-      const rj::Value& data = eventData["a"];
-      if (fieldSet.find(CCAPI_EM_BALANCE_UPDATE) != fieldSet.end() && !data["B"].Empty()) {
+      auto accountIt = eventData.FindMember("a");
+      if (accountIt == eventData.MemberEnd() || !accountIt->value.IsObject()) {
+        return;
+      }
+      const rj::Value& data = accountIt->value;
+      auto balanceIt = data.FindMember("B");
+      if (fieldSet.find(CCAPI_EM_BALANCE_UPDATE) != fieldSet.end() && balanceIt != data.MemberEnd() && balanceIt->value.IsArray() &&
+          !balanceIt->value.Empty()) {
         Message message;
         message.setTimeReceived(timeReceived);
         message.setCorrelationIdList({subscription.getCorrelationId()});
         message.setTime(TimePoint(std::chrono::milliseconds(std::stoll(eventData["E"].GetString()))));
         message.setType(Message::Type::EXECUTION_MANAGEMENT_EVENTS_BALANCE_UPDATE);
         std::vector<Element> elementList;
-        for (const auto& x : data["B"].GetArray()) {
+        for (const auto& x : balanceIt->value.GetArray()) {
           Element element;
-          element.insert(CCAPI_EM_ASSET, x["a"].GetString());
-          element.insert(CCAPI_EM_QUANTITY_TOTAL, x["wb"].GetString());
+          insertStringIfPresent(element, data, "m", CCAPI_EM_ACCOUNT_UPDATE_REASON);
+          insertStringIfPresent(element, x, "a", CCAPI_EM_ASSET);
+          insertStringIfPresent(element, x, "wb", CCAPI_EM_QUANTITY_TOTAL);
+          insertStringIfPresent(element, x, "cw", CCAPI_EM_CROSS_WALLET_BALANCE);
+          insertStringIfPresent(element, x, "bc", CCAPI_EM_BALANCE_CHANGE);
+          insertEventTimes(element, eventData);
           elementList.emplace_back(std::move(element));
         }
         message.setElementList(elementList);
         messageList.emplace_back(std::move(message));
       }
-      if (fieldSet.find(CCAPI_EM_POSITION_UPDATE) != fieldSet.end() && !data["P"].Empty()) {
+      auto positionIt = data.FindMember("P");
+      if (fieldSet.find(CCAPI_EM_POSITION_UPDATE) != fieldSet.end() && positionIt != data.MemberEnd() && positionIt->value.IsArray() &&
+          !positionIt->value.Empty()) {
         Message message;
         message.setTimeReceived(timeReceived);
         message.setCorrelationIdList({subscription.getCorrelationId()});
         message.setTime(TimePoint(std::chrono::milliseconds(std::stoll((this->isDerivatives ? eventData : data)["E"].GetString()))));
         message.setType(Message::Type::EXECUTION_MANAGEMENT_EVENTS_POSITION_UPDATE);
         std::vector<Element> elementList;
-        for (const auto& x : data["P"].GetArray()) {
+        for (const auto& x : positionIt->value.GetArray()) {
           Element element;
-          element.insert(CCAPI_INSTRUMENT, x["s"].GetString());
-          element.insert(CCAPI_EM_POSITION_SIDE, x["ps"].GetString());
-          element.insert(CCAPI_EM_POSITION_QUANTITY, x["pa"].GetString());
-          element.insert(CCAPI_EM_POSITION_ENTRY_PRICE, x["ep"].GetString());
-          element.insert(CCAPI_EM_UNREALIZED_PNL, x["up"].GetString());
+          insertStringIfPresent(element, data, "m", CCAPI_EM_ACCOUNT_UPDATE_REASON);
+          insertStringIfPresent(element, x, "s", CCAPI_INSTRUMENT);
+          insertStringIfPresent(element, x, "ps", CCAPI_EM_POSITION_SIDE);
+          insertStringIfPresent(element, x, "pa", CCAPI_EM_POSITION_QUANTITY);
+          insertStringIfPresent(element, x, "ep", CCAPI_EM_POSITION_ENTRY_PRICE);
+          insertStringIfPresent(element, x, "bep", CCAPI_EM_POSITION_BREAK_EVEN_PRICE);
+          insertStringIfPresent(element, x, "cr", CCAPI_EM_POSITION_ACCUMULATED_REALIZED_PNL);
+          insertStringIfPresent(element, x, "up", CCAPI_EM_UNREALIZED_PNL);
+          insertStringIfPresent(element, x, "mt", CCAPI_EM_POSITION_MARGIN_TYPE);
+          insertStringIfPresent(element, x, "iw", CCAPI_EM_POSITION_ISOLATED_WALLET);
+          insertEventTimes(element, eventData);
           elementList.emplace_back(std::move(element));
         }
         message.setElementList(elementList);
         messageList.emplace_back(std::move(message));
       }
+    } else if (this->isDerivatives && type == "ACCOUNT_CONFIG_UPDATE") {
+      event.setType(Event::Type::SUBSCRIPTION_DATA);
+      Message message;
+      message.setTimeReceived(timeReceived);
+      message.setCorrelationIdList({subscription.getCorrelationId()});
+      message.setType(Message::Type::EXECUTION_MANAGEMENT_EVENTS_ACCOUNT_CONFIG_UPDATE);
+      std::vector<Element> elementList;
+      auto accountConfigIt = eventData.FindMember("ac");
+      if (accountConfigIt != eventData.MemberEnd() && accountConfigIt->value.IsObject()) {
+        Element element;
+        insertStringIfPresent(element, accountConfigIt->value, "s", CCAPI_INSTRUMENT);
+        insertStringIfPresent(element, accountConfigIt->value, "l", CCAPI_EM_POSITION_LEVERAGE);
+        insertEventTimes(element, eventData);
+        elementList.emplace_back(std::move(element));
+      }
+      auto accountInfoIt = eventData.FindMember("ai");
+      if (accountInfoIt != eventData.MemberEnd() && accountInfoIt->value.IsObject()) {
+        Element element;
+        insertBoolIfPresent(element, accountInfoIt->value, "j", CCAPI_EM_MULTI_ASSETS_MODE);
+        insertEventTimes(element, eventData);
+        elementList.emplace_back(std::move(element));
+      }
+      if (!elementList.empty()) {
+        message.setElementList(elementList);
+        messageList.emplace_back(std::move(message));
+      }
+    } else if (this->isDerivatives && type == "MARGIN_CALL") {
+      event.setType(Event::Type::SUBSCRIPTION_DATA);
+      Message message;
+      message.setTimeReceived(timeReceived);
+      message.setCorrelationIdList({subscription.getCorrelationId()});
+      message.setType(Message::Type::EXECUTION_MANAGEMENT_EVENTS_MARGIN_CALL);
+      std::vector<Element> elementList;
+      auto positionsIt = eventData.FindMember("p");
+      if (positionsIt != eventData.MemberEnd() && positionsIt->value.IsArray()) {
+        for (const auto& position : positionsIt->value.GetArray()) {
+          Element element;
+          insertStringIfPresent(element, eventData, "cw", CCAPI_EM_CROSS_WALLET_BALANCE);
+          insertStringIfPresent(element, position, "s", CCAPI_INSTRUMENT);
+          insertStringIfPresent(element, position, "ps", CCAPI_EM_POSITION_SIDE);
+          insertStringIfPresent(element, position, "pa", CCAPI_EM_POSITION_QUANTITY);
+          insertStringIfPresent(element, position, "mt", CCAPI_EM_POSITION_MARGIN_TYPE);
+          insertStringIfPresent(element, position, "iw", CCAPI_EM_POSITION_ISOLATED_WALLET);
+          insertStringIfPresent(element, position, "mp", CCAPI_MARK_PRICE_VALUE);
+          insertStringIfPresent(element, position, "up", CCAPI_EM_UNREALIZED_PNL);
+          insertEventTimes(element, eventData);
+          elementList.emplace_back(std::move(element));
+        }
+      }
+      if (elementList.empty()) {
+        Element element;
+        insertStringIfPresent(element, eventData, "cw", CCAPI_EM_CROSS_WALLET_BALANCE);
+        insertEventTimes(element, eventData);
+        elementList.emplace_back(std::move(element));
+      }
+      message.setElementList(elementList);
+      messageList.emplace_back(std::move(message));
     } else if (!this->isDerivatives && type == "outboundAccountPosition") {
       // spot balance snapshot after a change; mirrors the spot REST GET_ACCOUNT_BALANCES mapping (total = free + locked, available = free)
       event.setType(Event::Type::SUBSCRIPTION_DATA);
@@ -831,7 +1141,7 @@ class ExecutionManagementServiceBinanceBase : public ExecutionManagementService 
         {CCAPI_EM_ORDER_STATUS, std::make_pair("status", JsonDataType::STRING)},
         {CCAPI_EM_ORDER_INSTRUMENT, std::make_pair("symbol", JsonDataType::STRING)},
         {CCAPI_LAST_UPDATED_TIME_SECONDS, std::make_pair(this->isDerivatives ? "updateTime" : "transactTime", JsonDataType::STRING)},
-        {CCAPI_EM_CLIENT_ORDER_ID, std::make_pair("origClientOrderId", JsonDataType::STRING)},
+        {CCAPI_EM_CLIENT_ORDER_ID, std::make_pair("clientOrderId", JsonDataType::STRING)},
     };
 
     Element element;
@@ -839,15 +1149,25 @@ class ExecutionManagementServiceBinanceBase : public ExecutionManagementService 
                            {
                                {CCAPI_LAST_UPDATED_TIME_SECONDS, [](const std::string& input) { return UtilTime::convertMillisecondsStrToSecondsStr(input); }},
                            });
+    if (element.getValue(CCAPI_EM_CLIENT_ORDER_ID).empty()) {
+      auto it = document["result"].FindMember("origClientOrderId");
+      if (it != document["result"].MemberEnd() && it->value.IsString()) {
+        element.insert_or_assign(CCAPI_EM_CLIENT_ORDER_ID, it->value.GetString());
+      }
+    }
     elementList.emplace_back(std::move(element));
   }
 
   std::vector<std::string> createSendStringListFromSubscription(std::shared_ptr<WsConnection> wsConnectionPtr, const Subscription& subscription,
                                                                 const TimePoint& now, const std::map<std::string, std::string>& credential) override {
-    if (wsConnectionPtr->host == this->websocketOrderEntryHost) {
+    if (this->isOrderEntryConnection(wsConnectionPtr, &subscription.getFieldSet())) {
       auto it = credential.find(this->websocketOrderEntryApiPrivateKeyPathName);
-      if (it == credential.end()) {
+      if (it == credential.end() || it->second.empty()) {
         throw std::runtime_error("Missing credential: " + this->websocketOrderEntryApiPrivateKeyPathName);
+      }
+      auto apiKeyIt = credential.find(this->websocketOrderEntryApiKeyName);
+      if (apiKeyIt == credential.end() || apiKeyIt->second.empty()) {
+        throw std::runtime_error("Missing credential: " + this->websocketOrderEntryApiKeyName);
       }
       rj::Document document;
       document.SetObject();
@@ -856,7 +1176,7 @@ class ExecutionManagementServiceBinanceBase : public ExecutionManagementService 
       document.AddMember("id", rj::Value(this->websocketOrderEntrySessionLogonJsonId.c_str(), allocator).Move(), allocator);
       document.AddMember("method", "session.logon", allocator);
 
-      const auto& apiKey = credential.at(this->websocketOrderEntryApiKeyName);
+      const auto& apiKey = apiKeyIt->second;
       const auto& timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
 
       std::map<std::string, std::string> paramsMap{
@@ -887,8 +1207,14 @@ class ExecutionManagementServiceBinanceBase : public ExecutionManagementService 
       if (auto it = credential.find(this->websocketOrderEntryApiPrivateKeyPasswordName); it != credential.end()) {
         password = it->second;
       }
-      EVP_PKEY* pkey = UtilAlgorithm::loadPrivateKey(UtilAlgorithm::readFile(it->second), password);
-      std::string signature = UtilAlgorithm::signPayload(pkey, payload);
+      std::unique_ptr<EVP_PKEY, decltype(&EVP_PKEY_free)> pkey(UtilAlgorithm::loadPrivateKey(UtilAlgorithm::readFile(it->second), password), EVP_PKEY_free);
+      if (!pkey) {
+        throw std::runtime_error("Invalid private key: " + this->websocketOrderEntryApiPrivateKeyPathName);
+      }
+      if (EVP_PKEY_base_id(pkey.get()) != EVP_PKEY_ED25519) {
+        throw std::runtime_error("Private key must be Ed25519: " + this->websocketOrderEntryApiPrivateKeyPathName);
+      }
+      std::string signature = UtilAlgorithm::signPayload(pkey.get(), payload);
       params.AddMember("signature", rj::Value(signature.c_str(), allocator).Move(), allocator);
 
       document.AddMember("params", params, allocator);
@@ -926,6 +1252,9 @@ class ExecutionManagementServiceBinanceBase : public ExecutionManagementService 
   std::string websocketOrderEntryCancelOrderJsonIdPrefix{"order_cancel"};
   std::string websocketUserDataStreamSubscribeJsonId{"userdata_subscribe"};
   std::string websocketOrderEntryHost;
+  std::map<std::string, ConnectionRole> connectionRoleByConnectionIdMap;
+  std::map<std::string, uint64_t> connectionGenerationByConnectionIdMap;
+  uint64_t nextConnectionGeneration{};
 };
 
 } /* namespace ccapi */
