@@ -38,6 +38,12 @@ class WsConnection {
     for (const auto& x : credential) {
       shortCredential.insert(std::make_pair(x.first, UtilString::firstNCharacter(x.second, CCAPI_CREDENTIAL_DISPLAY_LENGTH)));
     }
+    auto displayHeaders = headers;
+    for (auto& header : displayHeaders) {
+      if (UtilString::toLower(header.first) == "x-mbx-apikey") {
+        header.second = "<redacted>";
+      }
+    }
     std::ostringstream oss;
     std::visit(
         [&oss](auto&& streamPtr) {
@@ -50,7 +56,7 @@ class WsConnection {
         streamPtr);
     std::string output = "WsConnection [longId = " + longId + ", id = " + id + ", url = " + url + ", group = " + group +
                          ", subscriptionList = " + ccapi::toString(subscriptionList) + ", credential = " + ccapi::toString(shortCredential) +
-                         ", proxyUrl = " + proxyUrl + ", status = " + statusToString(status) + ", headers = " + ccapi::toString(headers) +
+                         ", proxyUrl = " + proxyUrl + ", status = " + statusToString(status) + ", headers = " + ccapi::toString(displayHeaders) +
                          ", streamPtr = " + oss.str() + ", remoteCloseCode = " + std::to_string(remoteCloseCode) +
                          ", remoteCloseReason = " + std::string(remoteCloseReason.reason.c_str()) +
                          ", hostHttpHeaderValue = " + ccapi::toString(hostHttpHeaderValue) + ", path = " + ccapi::toString(path) +

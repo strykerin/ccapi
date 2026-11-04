@@ -351,6 +351,76 @@ Best bid and ask at 2020-07-27T23:56:51.935993000Z are:
 ```
 * Subscription fields: `MARKET_DEPTH`, `TRADE`, `CANDLESTICK`, `AGG_TRADE`(only applicable to binance family: https://binance-docs.github.io/apidocs/spot/en/#aggregate-trade-streams).
 
+### Binance Spot SBE market data
+
+Binance Spot WebSocket subscriptions can opt into SBE with
+`BINANCE_MARKET_DATA_ENCODING=SBE`. JSON remains the default. Public data uses an
+Ed25519 API key in the WebSocket handshake (`X-MBX-APIKEY`); no private key,
+signature or extra API permissions are needed. Supply the key as
+`BINANCE_API_KEY` on the subscription, through session credentials, or in the
+environment. A regular HMAC API key cannot access this endpoint.
+
+```cpp
+Subscription subscription(
+    "binance", "BTCUSDT", "MARKET_DEPTH",
+    "BINANCE_MARKET_DATA_ENCODING=SBE&MARKET_DEPTH_MAX=20&MARKET_DEPTH_RETURN_UPDATE=1",
+    "btc-depth", {{"BINANCE_API_KEY", ed25519ApiKey}});
+session.subscribe(subscription);
+```
+
+| Subscription | SBE stream | Exchange publication cadence |
+| --- | --- | --- |
+| `TRADE` | `<symbol>@trade` | Real time |
+| `MARKET_DEPTH_MAX=1` | `<symbol>@bestBidAsk` | Real time |
+| `MARKET_DEPTH_MAX=2..5000` | `<symbol>@depth` | 20 ms |
+| Depth 2..20 with `BINANCE_SBE_DEPTH_MODE=partial` | `<symbol>@depth20` | 50 ms |
+
+Depth defaults to incremental (`BINANCE_SBE_DEPTH_MODE=diff`), independently of
+requested output depth. Initialization uses the existing REST snapshot path
+(`limit=5000`, with its REST weight cost). Updates are buffered until a snapshot
+bridges their ID ranges; duplicate updates are ignored and gaps close the
+connection for resynchronization. Partial mode publishes the requested number
+of levels from each 20-level snapshot. Normal ccapi conflation options still
+apply; leave `CONFLATE_INTERVAL_MILLISECONDS=0` for the exchange's full cadence.
+These intervals are publication frequencies, not network latency guarantees.
+
+SBE uses `wss://stream-sbe.binance.com/stream`. The compile-time macro
+`CCAPI_BINANCE_SBE_URL_WS_BASE` overrides its root independently of the JSON
+endpoint. JSON and SBE subscriptions use separate connections on the same
+session's I/O thread. Control messages remain JSON. Binary messages decode to
+the existing `Event`/`Message`/`Element` contract, including decimal strings,
+correlation IDs and snapshot recap flags. Trade timestamps use `transactTime`;
+depth and BBO use `eventTime`, preserving microsecond precision. SBE BBO can
+omit superseded updates under load (Binance auto-culling), so its update IDs
+are not checked for continuity.
+
+The bounded decoder supports Binance stream schema **1:0**, all four templates,
+and exact mantissa/exponent conversion without floating point. Unsupported
+schemas/templates, malformed binary payloads and sequence gaps fail the feed
+and reconnect; they never fall back silently to JSON. `serverShutdown` also
+closes and reconnects. Unsupported subscription fields are rejected before
+connecting. SBE does not apply to Binance.US, Futures, order entry or account
+streams; those retain their existing protocols.
+
+Protocol and schema: [Binance SBE market data](https://github.com/binance/binance-spot-api-docs/blob/master/sbe-market-data-streams.md),
+[stream schema 1:0](https://github.com/binance/binance-spot-api-docs/blob/master/sbe/schemas/stream_1_0.xml).
+The decoder and service regression tests are in
+[test/test_unit/src/market_data/binance_sbe](test/test_unit/src/market_data/binance_sbe).
+
+After building `market_data_binance_sbe`, run its deterministic unit tests and
+[local TLS/WebSocket + REST integration test](test/run_binance_sbe_loopback.py):
+
+```sh
+build/sbe/test_unit/src/market_data/binance_sbe/market_data_binance_sbe '--gtest_filter=-BinanceSbeLoopback.*'
+python3 test/run_binance_sbe_loopback.py build/sbe/test_unit/src/market_data/binance_sbe/market_data_binance_sbe
+```
+
+The integration runner uses Python's standard library and the `openssl` CLI,
+creates a temporary local certificate and uses a dummy key. It verifies the
+handshake header, binary dispatch, REST bootstrap, sequence-gap detection and
+reconnection without accessing Binance. The loopback Google Test is skipped
+when run without the runner.
+
 ### Advanced Market Data
 
 #### Complex request parameters
