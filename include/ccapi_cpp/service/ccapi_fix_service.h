@@ -233,7 +233,7 @@ class FixService : public Service {
     this->onOpen(fixConnectionPtr);
   }
 
-  void onOpen(std::shared_ptr<FixConnection> fixConnectionPtr) {
+  virtual void onOpen(std::shared_ptr<FixConnection> fixConnectionPtr) {
     auto now = UtilTime::now();
     auto& connectionId = fixConnectionPtr->id;
     fixConnectionPtr->status = FixConnection::Status::OPEN;
@@ -276,7 +276,7 @@ class FixService : public Service {
     this->writeMessage(fixConnectionPtr, nowFixTimeStr, {param});
   }
 
-  void startReadFix(std::shared_ptr<FixConnection> fixConnectionPtr, void* data, size_t requestedNumBytesToRead) {
+  virtual void startReadFix(std::shared_ptr<FixConnection> fixConnectionPtr, void* data, size_t requestedNumBytesToRead) {
     std::visit(
         [&](auto& streamPtr) {
           CCAPI_LOGGER_TRACE("before async_read");
@@ -288,7 +288,7 @@ class FixService : public Service {
         fixConnectionPtr->streamPtr);
   }
 
-  void onReadFix(std::shared_ptr<FixConnection> fixConnectionPtr, const boost::system::error_code& ec, std::size_t n) {
+  virtual void onReadFix(std::shared_ptr<FixConnection> fixConnectionPtr, const boost::system::error_code& ec, std::size_t n) {
     CCAPI_LOGGER_FUNCTION_ENTER;
     CCAPI_LOGGER_TRACE("n = " + toString(n));
     auto now = UtilTime::now();
@@ -460,7 +460,7 @@ class FixService : public Service {
     CCAPI_LOGGER_FUNCTION_EXIT;
   }
 
-  void writeMessage(std::shared_ptr<FixConnection> fixConnectionPtr, const std::string& nowFixTimeStr,
+  virtual void writeMessage(std::shared_ptr<FixConnection> fixConnectionPtr, const std::string& nowFixTimeStr,
                     const std::vector<std::vector<std::pair<int, std::string>>>& paramList) {
     if (fixConnectionPtr->status != FixConnection::Status::OPEN) {
       CCAPI_LOGGER_WARN("should write no more messages");

@@ -21,6 +21,19 @@ class MarketDataServiceBinanceBase : public MarketDataService {
  protected:
 #endif
 
+  void validateMarketDataEncoding(const Subscription& subscription) const {
+    const auto options = subscription.getOptionMap();
+    const auto encoding = mapGetWithDefault(options, std::string(CCAPI_BINANCE_MARKET_DATA_ENCODING), std::string("JSON"));
+    if (encoding != "JSON" && (encoding != "SBE" || this->exchangeName != CCAPI_EXCHANGE_NAME_BINANCE)) {
+      throw std::invalid_argument("SBE market data is supported only for Binance Spot");
+    }
+  }
+
+  std::string getInstrumentGroup(const Subscription& subscription) override {
+    validateMarketDataEncoding(subscription);
+    return MarketDataService::getInstrumentGroup(subscription);
+  }
+
   void onOpen(std::shared_ptr<WsConnection> wsConnectionPtr) override {
     Service::onOpen(wsConnectionPtr);
     this->startSubscribe(wsConnectionPtr);

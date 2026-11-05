@@ -39,6 +39,7 @@ class MarketDataServiceBinanceUsdsFutures : public MarketDataServiceBinanceDeriv
  protected:
 #endif
   std::string getInstrumentGroup(const Subscription& subscription) override {
+    this->validateMarketDataEncoding(subscription);
     const auto& field = subscription.getField();
     if (field == CCAPI_GENERIC_PUBLIC_SUBSCRIPTION) {
       return MarketDataService::getInstrumentGroup(subscription);

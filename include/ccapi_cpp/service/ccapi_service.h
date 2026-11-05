@@ -1469,37 +1469,11 @@ class Service : public std::enable_shared_from_this<Service> {
               this->onError(Event::Type::SUBSCRIPTION_STATUS, Message::Type::GENERIC_ERROR, e);
             }
           } else if (stream.got_binary()) {
-            CCAPI_LOGGER_DEBUG("received a binary message: " + UtilAlgorithm::stringToHex(std::string(data, dataSize)));
-
-#if CCAPI_REQUIRES_INFLATE_STREAM
-
-            if (this->needDecompressWebsocketMessage) {
-              std::string decompressed;
-              boost::beast::string_view payload(data, dataSize);
-              try {
-                ErrorCode ec = this->inflater.decompress(reinterpret_cast<const uint8_t*>(&payload[0]), payload.size(), decompressed);
-                if (ec) {
-                  CCAPI_LOGGER_FATAL(ec.message());
-                }
-                CCAPI_LOGGER_DEBUG("decompressed = " + decompressed);
-                this->onTextMessage(wsConnectionPtr, decompressed, now);
-              } catch (const std::exception& e) {
-                std::stringstream ss;
-                ss << std::hex << std::setfill('0');
-                for (int i = 0; i < payload.size(); ++i) {
-                  ss << std::setw(2) << static_cast<unsigned>(reinterpret_cast<const uint8_t*>(&payload[0])[i]);
-                }
-                CCAPI_LOGGER_ERROR("binaryMessage = " + ss.str());
-                this->onError(Event::Type::SUBSCRIPTION_STATUS, Message::Type::GENERIC_ERROR, e);
-              }
-
-              ErrorCode ec = this->inflater.inflate_reset();
-              if (ec) {
-                this->onError(Event::Type::SUBSCRIPTION_STATUS, Message::Type::GENERIC_ERROR, ec, "decompress");
-              }
+            try {
+              this->onBinaryMessage(wsConnectionPtr, boost::beast::string_view(data, dataSize), now);
+            } catch (const std::exception& e) {
+              this->onError(Event::Type::SUBSCRIPTION_STATUS, Message::Type::GENERIC_ERROR, e);
             }
-
-#endif  // decompress block
           }
         },
         wsConnectionPtr->streamPtr);  // <-- std::variant
@@ -1646,6 +1620,37 @@ class Service : public std::enable_shared_from_this<Service> {
     return std::to_string(std::stoll(input.substr(0, dotPosition)) * 1000 + std::stoll(UtilString::rightPadTo(input.substr(dotPosition + 1, 3), 3, '0')));
   }
 
+  virtual void onBinaryMessage(std::shared_ptr<WsConnection> wsConnectionPtr, boost::beast::string_view binaryMessage, const TimePoint& timeReceived) {
+#if CCAPI_REQUIRES_INFLATE_STREAM
+
+    if (this->needDecompressWebsocketMessage) {
+      std::string decompressed;
+      boost::beast::string_view payload = binaryMessage;
+      try {
+        ErrorCode ec = this->inflater.decompress(reinterpret_cast<const uint8_t*>(&payload[0]), payload.size(), decompressed);
+        if (ec) {
+          CCAPI_LOGGER_FATAL(ec.message());
+        }
+        CCAPI_LOGGER_DEBUG("decompressed = " + decompressed);
+        this->onTextMessage(wsConnectionPtr, decompressed, timeReceived);
+      } catch (const std::exception& e) {
+        std::stringstream ss;
+        ss << std::hex << std::setfill('0');
+        for (int i = 0; i < payload.size(); ++i) {
+          ss << std::setw(2) << static_cast<unsigned>(reinterpret_cast<const uint8_t*>(&payload[0])[i]);
+        }
+        CCAPI_LOGGER_ERROR("binaryMessage = " + ss.str());
+        this->onError(Event::Type::SUBSCRIPTION_STATUS, Message::Type::GENERIC_ERROR, e);
+      }
+
+      ErrorCode ec = this->inflater.inflate_reset();
+      if (ec) {
+        this->onError(Event::Type::SUBSCRIPTION_STATUS, Message::Type::GENERIC_ERROR, ec, "decompress");
+      }
+    }
+
+#endif  // decompress block
+  }
   virtual void onTextMessage(std::shared_ptr<WsConnection> wsConnectionPtr, boost::beast::string_view textMessage, const TimePoint& timeReceived) {}
 
   bool hostHttpHeaderValueIgnorePort{};

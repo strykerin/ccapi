@@ -1,0 +1,7 @@
+set(NAME binance_protocol_sbe)
+add_executable(${NAME} ${SOURCE_LOGGER} test.cpp)
+target_compile_definitions(${NAME} PRIVATE CCAPI_ENABLE_SERVICE_FIX CCAPI_ENABLE_SERVICE_EXECUTION_MANAGEMENT CCAPI_ENABLE_EXCHANGE_BINANCE)
+if(NOT CCAPI_LEGACY_USE_WEBSOCKETPP)
+  add_dependencies(${NAME} boost rapidjson hffix)
+endif()
+gtest_discover_tests(${NAME})

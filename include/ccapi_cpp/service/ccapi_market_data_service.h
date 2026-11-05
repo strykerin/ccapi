@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <map>
 #include <string>
 #include <vector>
@@ -1465,11 +1466,26 @@ class MarketDataService : public Service {
     }
   }
 
+  virtual bool usesSpotOrderBookUpdateRangeCheck(const std::shared_ptr<WsConnection>& connection) const { return false; }
+
   bool processOrderBookWithVersionId(int64_t versionId, std::shared_ptr<WsConnection> wsConnectionPtr, const std::string& channelId,
                                      const std::string& symbolId, const std::string& exchangeSubscriptionId,
                                      const std::map<std::string, std::string>& optionMap, std::vector<MarketDataMessage>& marketDataMessageList,
                                      const MarketDataMessage& marketDataMessage, int64_t firstUpdateId = -1, int64_t previousFinalUpdateId = -1) {
     if (this->processedInitialSnapshotByConnectionIdChannelIdSymbolIdMap[wsConnectionPtr->id][channelId][symbolId]) {
+      if (this->usesSpotOrderBookUpdateRangeCheck(wsConnectionPtr)) {
+        const auto& versions = this->orderbookVersionIdByConnectionIdExchangeSubscriptionIdMap[wsConnectionPtr->id];
+        auto it = versions.find(exchangeSubscriptionId);
+        if (it == versions.end()) {
+          return false;
+        }
+        if (versionId <= it->second) {
+          return true;
+        }
+        if (firstUpdateId - 1 > it->second) {
+          return false;
+        }
+      }
       if (this->enableOrderBookUpdateRangeCheck) {
         auto connectionIt = this->orderbookVersionIdByConnectionIdExchangeSubscriptionIdMap.find(wsConnectionPtr->id);
         if (connectionIt == this->orderbookVersionIdByConnectionIdExchangeSubscriptionIdMap.end()) {
@@ -1537,14 +1553,15 @@ class MarketDataService : public Service {
     return it != buffer.end() && it->second.firstUpdateId <= snapshotVersionId ? it->first : -1;
   }
 
-  bool isOrderBookUpdateChainContiguous(int64_t bridgeVersionId, const std::map<int64_t, BufferedOrderBookUpdate>& buffer) const {
+  bool isOrderBookUpdateChainContiguous(int64_t bridgeVersionId, const std::map<int64_t, BufferedOrderBookUpdate>& buffer,
+                                         bool spot = false) const {
     auto it = buffer.find(bridgeVersionId);
     if (it == buffer.end()) {
       return false;
     }
     int64_t previousFinalUpdateId = it->second.finalUpdateId;
     for (++it; it != buffer.end(); ++it) {
-      if (it->second.previousFinalUpdateId != previousFinalUpdateId) {
+      if (spot ? it->second.firstUpdateId - 1 > previousFinalUpdateId : it->second.previousFinalUpdateId != previousFinalUpdateId) {
         return false;
       }
       previousFinalUpdateId = it->second.finalUpdateId;
@@ -1633,12 +1650,17 @@ class MarketDataService : public Service {
               auto& buffer = bufferIt->second;
               auto firstBufferedVersionId = buffer.begin()->first;
               auto bridgeIt = buffer.end();
-              if (that->enableOrderBookUpdateRangeCheck) {
-                while (!buffer.empty() && buffer.begin()->second.finalUpdateId < versionId) {
+              bool spotRangeCheck = that->usesSpotOrderBookUpdateRangeCheck(wsConnectionPtr);
+              if (that->enableOrderBookUpdateRangeCheck || spotRangeCheck) {
+                if (spotRangeCheck && versionId == std::numeric_limits<int64_t>::max()) {
+                  throw std::runtime_error("invalid snapshot update ID");
+                }
+                const auto bridgeTarget = spotRangeCheck ? versionId + 1 : versionId;
+                while (!buffer.empty() && buffer.begin()->second.finalUpdateId < bridgeTarget) {
                   buffer.erase(buffer.begin());
                 }
-                auto bridgeVersionId = that->findOrderBookSnapshotBridge(versionId, buffer);
-                if (bridgeVersionId >= 0 && that->isOrderBookUpdateChainContiguous(bridgeVersionId, buffer)) {
+                auto bridgeVersionId = that->findOrderBookSnapshotBridge(bridgeTarget, buffer);
+                if (bridgeVersionId >= 0 && that->isOrderBookUpdateChainContiguous(bridgeVersionId, buffer, spotRangeCheck)) {
                   bridgeIt = buffer.find(bridgeVersionId);
                 }
               } else if (versionId >= firstBufferedVersionId) {
