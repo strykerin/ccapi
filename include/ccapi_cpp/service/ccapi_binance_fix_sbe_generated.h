@@ -5,6 +5,7 @@ namespace ccapi { namespace BinanceProtocolSbe { namespace Fix {
 inline constexpr uint16_t schemaId = 1;
 inline constexpr uint16_t schemaVersion = 2;
 inline rj::Value decode(std::string_view bytes, Allocator& allocator, unsigned depth = 0);
+inline constexpr uint16_t requestSchemaVersion = 1;
 inline rj::Value decode20001(Reader& reader, size_t blockLength, uint16_t version, Allocator& allocator, unsigned depth) {
   auto start = reader.position;
   reader.require(blockLength);
@@ -1478,7 +1479,7 @@ inline rj::Value decode(std::string_view bytes, Allocator& allocator, unsigned d
 }
 inline std::string encode20001(const Params& params, uint32_t sequence, int64_t sendingTime) {
   Writer writer;
-  writer.header(0, 20001, schemaId, schemaVersion, sequence, sendingTime);
+  writer.header(0, 20001, schemaId, requestSchemaVersion, sequence, sendingTime);
   Parameters input(params);
   writer.string<uint8_t>(input.string(112, true));
   input.finish();
@@ -1486,7 +1487,7 @@ inline std::string encode20001(const Params& params, uint32_t sequence, int64_t 
 }
 inline std::string encode20002(const Params& params, uint32_t sequence, int64_t sendingTime) {
   Writer writer;
-  writer.header(0, 20002, schemaId, schemaVersion, sequence, sendingTime);
+  writer.header(0, 20002, schemaId, requestSchemaVersion, sequence, sendingTime);
   Parameters input(params);
   writer.string<uint8_t>(input.string(112, false));
   input.finish();
@@ -1494,7 +1495,7 @@ inline std::string encode20002(const Params& params, uint32_t sequence, int64_t 
 }
 inline std::string encode20004(const Params& params, uint32_t sequence, int64_t sendingTime) {
   Writer writer;
-  writer.header(0, 20004, schemaId, schemaVersion, sequence, sendingTime);
+  writer.header(0, 20004, schemaId, requestSchemaVersion, sequence, sendingTime);
   Parameters input(params);
   writer.string<uint16_t>(input.string(58, true));
   input.finish();
@@ -1502,7 +1503,7 @@ inline std::string encode20004(const Params& params, uint32_t sequence, int64_t 
 }
 inline std::string encode20008(const Params& params, uint32_t sequence, int64_t sendingTime) {
   Writer writer;
-  writer.header(14, 20008, schemaId, schemaVersion, sequence, sendingTime);
+  writer.header(14, 20008, schemaId, requestSchemaVersion, sequence, sendingTime);
   Parameters input(params);
   writer.write<uint8_t>(input.number<uint8_t>(98, true, false, false));
   writer.write<uint32_t>(input.number<uint32_t>(108, false, false, false));
@@ -1521,7 +1522,7 @@ inline std::string encode20008(const Params& params, uint32_t sequence, int64_t 
 }
 inline std::string encode99(const Params& params, uint32_t sequence, int64_t sendingTime) {
   Writer writer;
-  writer.header(84, 99, schemaId, schemaVersion, sequence, sendingTime);
+  writer.header(76, 99, schemaId, requestSchemaVersion, sequence, sendingTime);
   Parameters input(params);
   writer.write<int8_t>(input.number<int8_t>(25054, false, false, false));
   writer.write<int8_t>(input.number<int8_t>(25055, false, false, false));
@@ -1547,7 +1548,6 @@ inline std::string encode99(const Params& params, uint32_t sequence, int64_t sen
   writer.write<int64_t>(input.number<int64_t>(7940, true, false, false));
   writer.write<uint8_t>(input.number<uint8_t>(25001, true, true, false));
   writer.write<uint8_t>(input.number<uint8_t>(25032, true, false, true));
-  writer.write<int64_t>(input.mantissa(25057, 25054, true));
   writer.string<uint8_t>(input.string(11, false));
   writer.string<uint8_t>(input.string(55, false));
   input.finish();
@@ -1555,7 +1555,7 @@ inline std::string encode99(const Params& params, uint32_t sequence, int64_t sen
 }
 inline std::string encode101(const Params& params, uint32_t sequence, int64_t sendingTime) {
   Writer writer;
-  writer.header(17, 101, schemaId, schemaVersion, sequence, sendingTime);
+  writer.header(17, 101, schemaId, requestSchemaVersion, sequence, sendingTime);
   Parameters input(params);
   writer.write<int64_t>(input.number<int64_t>(37, true, false, false));
   writer.write<int64_t>(input.number<int64_t>(66, true, false, false));
@@ -1569,7 +1569,7 @@ inline std::string encode101(const Params& params, uint32_t sequence, int64_t se
 }
 inline std::string encode103(const Params& params, uint32_t sequence, int64_t sendingTime) {
   Writer writer;
-  writer.header(1, 103, schemaId, schemaVersion, sequence, sendingTime);
+  writer.header(1, 103, schemaId, requestSchemaVersion, sequence, sendingTime);
   Parameters input(params);
   writer.write<uint8_t>(input.number<uint8_t>(530, false, true, false));
   writer.string<uint8_t>(input.string(55, false));
@@ -1579,7 +1579,7 @@ inline std::string encode103(const Params& params, uint32_t sequence, int64_t se
 }
 inline std::string encode105(const Params& params, uint32_t sequence, int64_t sendingTime) {
   Writer writer;
-  writer.header(17, 105, schemaId, schemaVersion, sequence, sendingTime);
+  writer.header(17, 105, schemaId, requestSchemaVersion, sequence, sendingTime);
   Parameters input(params);
   writer.write<int64_t>(input.number<int64_t>(37, true, false, false));
   writer.write<int8_t>(input.number<int8_t>(25055, false, false, false));
@@ -1592,7 +1592,7 @@ inline std::string encode105(const Params& params, uint32_t sequence, int64_t se
 }
 inline std::string encode120(const Params& params, uint32_t sequence, int64_t sendingTime) {
   Writer writer;
-  writer.header(0, 120, schemaId, schemaVersion, sequence, sendingTime);
+  writer.header(0, 120, schemaId, requestSchemaVersion, sequence, sendingTime);
   Parameters input(params);
   writer.string<uint8_t>(input.string(6136, false));
   input.finish();
@@ -1600,7 +1600,7 @@ inline std::string encode120(const Params& params, uint32_t sequence, int64_t se
 }
 inline std::string encode200(const Params& params, uint32_t sequence, int64_t sendingTime) {
   Writer writer;
-  writer.header(1, 200, schemaId, schemaVersion, sequence, sendingTime);
+  writer.header(1, 200, schemaId, requestSchemaVersion, sequence, sendingTime);
   Parameters input(params);
   writer.write<uint8_t>(input.number<uint8_t>(559, false, false, false));
   writer.string<uint8_t>(input.string(320, false));
@@ -1610,7 +1610,7 @@ inline std::string encode200(const Params& params, uint32_t sequence, int64_t se
 }
 inline std::string encode202(const Params& params, uint32_t sequence, int64_t sendingTime) {
   Writer writer;
-  writer.header(4, 202, schemaId, schemaVersion, sequence, sendingTime);
+  writer.header(4, 202, schemaId, requestSchemaVersion, sequence, sendingTime);
   Parameters input(params);
   writer.write<uint8_t>(input.number<uint8_t>(263, false, true, false));
   writer.write<uint16_t>(input.number<uint16_t>(264, true, false, false));

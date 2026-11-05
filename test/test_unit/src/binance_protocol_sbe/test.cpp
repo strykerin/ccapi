@@ -36,6 +36,23 @@ TEST(BinanceProtocolSbe, OrderEncodingMatchesIndependentFixture) {
   params.emplace_back(9999, "unsupported");
   EXPECT_THROW(codec::Fix::encode(params, 7, 0), std::runtime_error);
 }
+TEST(BinanceProtocolSbe, ProductionRequestVersionAndBlockLengths) {
+  codec::Params logon{{35,"A"},{98,"0"},{108,"30"},{141,"Y"},{25035,"1"},
+                      {49,"1"},{56,"SPOT"},{96,"signature"},{553,"key"}};
+  auto bytes = codec::Fix::encode(logon, 1, 1720000000000123LL);
+  EXPECT_EQ(bytes, fixture("fix_logon"));
+  codec::Reader reader(bytes);
+  EXPECT_EQ(reader.at<uint16_t>(6), 14);
+  EXPECT_EQ(reader.at<uint16_t>(8), 20008);
+  EXPECT_EQ(reader.at<uint16_t>(10), 1);
+  EXPECT_EQ(reader.at<uint16_t>(12), 1);
+  codec::Params order{{35,"D"},{25054,"-2"},{25055,"-8"},{38,"0.00010000"},{40,"2"},
+                      {54,"1"},{44,"350000.25"},{59,"1"},{11,"benchmark-1"},{55,"BTCBRL"}};
+  bytes = codec::Fix::encode(order, 7, 1720000000000123LL);
+  EXPECT_EQ(codec::Reader(bytes).at<uint16_t>(6), 76);
+  order.emplace_back(25057, "100");
+  EXPECT_THROW(codec::Fix::encode(order, 7, 0), std::runtime_error);
+}
 TEST(BinanceProtocolSbe, MarketDataRequestGroupsAndCancel) {
   codec::Params params{{35,"V"},{263,"1"},{264,"1"},{146,"1"},{55,"BTCBRL"},{267,"2"},{269,"0"},{269,"1"},{262,"bbo"}};
   EXPECT_EQ(codec::Fix::encode(params, 2, 1720000000000123LL), fixture("fix_md_request"));
@@ -81,6 +98,10 @@ TEST(BinanceProtocolSbe, TruncationSchemaAndLengthRejection) {
 }
 TEST(BinanceProtocolSbe, OlderFixSchemaAndNullCharacter) {
   rapidjson::Document doc;
+  auto versionOne = codec::Fix::decode(fixture("fix_execution_v1"), doc.GetAllocator());
+  EXPECT_FALSE(versionOne.HasMember("25057"));
+  EXPECT_FALSE(versionOne.HasMember("25058"));
+  EXPECT_STREQ(versionOne["39"].GetString(), "0");
   auto decoded = codec::Fix::decode(fixture("fix_execution_v0"), doc.GetAllocator());
   EXPECT_FALSE(decoded.HasMember("18"));
   EXPECT_FALSE(decoded.HasMember("25056"));
@@ -164,6 +185,18 @@ TEST_F(BinanceProtocolServiceTest, FixAuthorizationSequenceAndGroupPreservation)
   for (const auto& tag : message.getElementList()[0].getTagValueList()) if (tag.first == 1003) ++trades;
   EXPECT_EQ(trades, 2);
   EXPECT_THROW(fix->processSbeFrame(connection, fixture("fix_trade"), received), std::runtime_error);
+}
+TEST_F(BinanceProtocolServiceTest, RejectedLogonDoesNotReconnectInATightLoop) {
+  Subscription sub("binance", "", CCAPI_FIX_MARKET_DATA, "BINANCE_FIX_ENCODING=SBE", "rejected");
+  auto connection = std::make_shared<FixConnection>("tcp://localhost:9002", sub, std::map<std::string,std::string>{});
+  fix->sbeStateByConnection[connection->id] = std::make_shared<FixServiceBinance::SbeState>();
+  EXPECT_THROW(fix->processSbeFrame(connection, fixture("fix_logon_reject"), received), std::runtime_error);
+  ASSERT_EQ(events.size(), 1U);
+  EXPECT_EQ(events[0].getMessageList()[0].getType(), Message::Type::AUTHORIZATION_FAILURE);
+  EXPECT_EQ(fix->rejectedSbeConnections.count(connection->id), 1U);
+  fix->sbeStateByConnection.erase(connection->id);
+  fix->connect(connection);
+  EXPECT_TRUE(fix->sbeStateByConnection.empty());
 }
 TEST_F(BinanceProtocolServiceTest, JsonRemainsDefaultAndConnectionsAreIndependent) {
   EXPECT_FALSE(ExecutionManagementServiceBinance::usesSbeOrderEntry(Subscription{}));

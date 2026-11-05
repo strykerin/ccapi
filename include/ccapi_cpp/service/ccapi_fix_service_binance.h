@@ -3,6 +3,7 @@
 #ifdef CCAPI_ENABLE_SERVICE_FIX
 #ifdef CCAPI_ENABLE_EXCHANGE_BINANCE
 #include <deque>
+#include <set>
 #include <boost/asio/ssl/host_name_verification.hpp>
 #include "ccapi_cpp/ccapi_hmac.h"
 #include "ccapi_cpp/service/ccapi_binance_fix_sbe_generated.h"
@@ -59,7 +60,9 @@ class FixServiceBinance : public FixService {
     const auto& msgSeqNum = std::to_string(1);
     this->senderCompId = this->createSenderCompId();
     this->senderCompIdByConnection[fixConnectionPtr->id] = this->senderCompId;
-    std::vector<std::string> prehashFieldList{msgType, this->senderCompId, this->targetCompId, msgSeqNum, nowFixTimeStr};
+    // Binary SendingTime is reconstructed with six fractional digits by Binance.
+    const auto signatureTime = usesSbe(fixConnectionPtr->subscription) ? nowFixTimeStr + "000" : nowFixTimeStr;
+    std::vector<std::string> prehashFieldList{msgType, this->senderCompId, this->targetCompId, msgSeqNum, signatureTime};
     const auto& payload = UtilString::join(prehashFieldList, "\x01");
 
     auto it = credential.find(this->fixApiPrivateKeyPathName);
@@ -96,6 +99,7 @@ class FixServiceBinance : public FixService {
   };
   std::map<std::string, std::shared_ptr<SbeState>> sbeStateByConnection;
   std::map<std::string, std::string> senderCompIdByConnection;
+  std::set<std::string> rejectedSbeConnections;
 
   static bool usesSbe(const Subscription& subscription) {
     auto it = subscription.getOptionMap().find(CCAPI_BINANCE_FIX_ENCODING);
@@ -108,6 +112,7 @@ class FixServiceBinance : public FixService {
       return;
     }
     if (usesSbe(connection->subscription)) {
+      if (this->rejectedSbeConnections.count(connection->id)) return;
       if (connection->host == "fix-oe.binance.com" || connection->host == "fix-md.binance.com") {
         connection->setUrl("tcp+tls://" + connection->host + ":9002");
       }
@@ -143,6 +148,7 @@ class FixServiceBinance : public FixService {
         }
       });
     } catch (const std::exception& error) {
+      this->rejectedSbeConnections.insert(connection->id);
       this->onError(Event::Type::AUTHORIZATION_STATUS, Message::Type::AUTHORIZATION_FAILURE, error.what(), {connection->subscription.getCorrelationId()});
       this->onClose(connection, boost::asio::error::invalid_argument);
     }
@@ -200,6 +206,7 @@ class FixServiceBinance : public FixService {
                 {{{35, "0"}}, {{35, "1"}, {112, std::to_string(std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch()).count())}}});
           });
     } else if (!state->authorized) {
+      this->rejectedSbeConnections.insert(connection->id);
       event.setType(Event::Type::AUTHORIZATION_STATUS);
       message.setType(Message::Type::AUTHORIZATION_FAILURE);
     }

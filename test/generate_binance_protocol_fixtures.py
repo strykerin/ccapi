@@ -50,7 +50,7 @@ class Schema:
                 tail += struct.pack('<'+FORMATS[primitive],len(payload))+payload
         return len(fixed),fixed+tail
     def message(self,tid,values,sequence=2,version=None):
-        if version is None: version=int(self.root.get('version'))
+        if version is None: version=1 if self.root.get('id')=='1' else int(self.root.get('version'))
         block, body = self.body(self.messages[tid], values, version)
         head = struct.pack('<HHHH',block,tid,int(self.root.get('id')),version)
         if self.root.get('id')=='1':
@@ -79,7 +79,9 @@ def generate():
         if tid!=207: bid['MDEntrySize']=10000
         save(name,fix.message(tid,dict(base,FirstBookUpdateID=100,LastBookUpdateID=101,MDEntriesBids=[bid],MDEntriesAsks=[dict(MDEntryPx=35000100,MDEntrySize=20000)])))
     execution=dict(base,OrderID=12345,OrderQty=10000,Price=35000025,OrdType='2',Side='1',ExecType='0',OrdStatus='0',ClOrdID='benchmark-1')
-    save('fix_execution',fix.message(98,execution))
+    save('fix_execution',fix.message(98,execution,version=2))
+    save('fix_execution_v1',fix.message(98,execution,version=1))
+    save('fix_logon_reject',fix.message(20003,dict(RefSeqNum=1,SessionRejectReason=99,ErrorCode=-1152,RefMsgType='A',Text='Invalid SBE message header.'),sequence=1))
     save('fix_execution_v0',fix.message(98,execution,version=0))
     save('fix_ack',fix.message(198,dict(OrderID=12345,TransactTime=NOW,ExecType='0',OrdStatus='0',ClOrdID='benchmark-1',Symbol='BTCBRL')))
     save('fix_logon',fix.message(20008,dict(EncryptMethod=0,HeartBtInt=30,ResetSeqNumFlag=1,MessageHandling=1,SenderCompId='1',TargetCompId='SPOT',RawData='signature',Username='key'),sequence=1))

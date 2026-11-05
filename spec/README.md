@@ -10,5 +10,10 @@ alias to `spot-fixsbe-1_2.xml`; the complete XML is checked in here. The generat
 uses the checked-in files, never a moving `latest` URL. Update the decoder,
 fixtures and subscription negotiation together when upgrading a schema.
 
+FIX requests currently target 1:1, filtering newer fields out of the 1:2 XML.
+Production market-data logon rejected 1:2 (`-1152`) and accepted 1:1 on
+2026-11-05. Decoders retain support through 1:2. Upstream aliases must not be
+used as proof that a schema version is deployed to production.
+
 Regenerate headers with `python3 tools/generate_binance_protocol_sbe.py` and
 fixtures with `python3 test/generate_binance_protocol_fixtures.py`.

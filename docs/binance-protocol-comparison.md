@@ -9,7 +9,7 @@ the defaults, and can run alongside SBE connections in the same Session.
 | WebSocket market data SBE | `BINANCE_MARKET_DATA_ENCODING=SBE` | JSON controls | SBE stream schema 1:0 |
 | WebSocket order entry JSON | default | JSON | JSON |
 | WebSocket order entry SBE | `BINANCE_WEBSOCKET_ORDER_ENTRY_ENCODING=SBE` | JSON | SBE API schema 3:4 |
-| FIX market data / order entry SBE | `BINANCE_FIX_ENCODING=SBE` | SBE | SBE FIX schema 1:2 |
+| FIX market data / order entry SBE | `BINANCE_FIX_ENCODING=SBE` | SBE FIX schema 1:1 | SBE FIX schemas 1:0–1:2 |
 
 These are Spot-only additions. This change does not configure the engine, select
 protocols in its strategy, place live orders, or establish a measured latency
@@ -78,6 +78,11 @@ Port 9001's mixed textual-request/binary-response mode is not implemented.
 options to receive full execution reports, including subsequent fills/cancels.
 `25035=1` permits unordered processing; keep this setting explicit in comparisons.
 FIX SBE's `25000` receive window is **microseconds** and is set on Logon only.
+Outgoing messages use schema 1:1: the production market-data endpoint rejected
+1:2 with `-1152` in a live check on 2026-11-05. The vendored 1:2 XML is used for
+decoding newer responses; it is not evidence of the server's deployed version.
+Version-2-only request fields, including `25057`, fail locally. SBE logon signatures
+format SendingTime with six fractional digits; textual FIX keeps milliseconds.
 
 Wait for `AUTHORIZATION_SUCCESS`, then use the existing raw FIX API:
 
@@ -137,6 +142,9 @@ FIX events explicitly.
   Decode/sequence errors emit `FIX_FAILURE`, invalidate the connection and reconnect.
   Resubscribe market-data streams after authorization and reconcile outstanding
   orders; in-flight orders are never automatically resubmitted.
+- Explicit logon rejection or a local signing/configuration failure stops retries
+  for that SBE connection. Correct the configuration and restart the Session;
+  repeated authentication attempts would consume the connection-attempt limit.
 
 ## Comparison methodology
 

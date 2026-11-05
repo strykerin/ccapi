@@ -24,7 +24,7 @@ def read_fix(sock):
     assert encoding==0xeb50 and 26<=length<=1048576
     data=header+exact(sock,length-6)
     block,tid,schema,version,seq=struct.unpack_from('<HHHHI',data,6)
-    assert schema==1 and version==2
+    assert schema==1 and version==1
     return tid,seq,data,block
 
 
@@ -73,9 +73,10 @@ def test(executable):
                     value=data[offset:offset+length];offset+=length;return value
                 sender=variable('B');target=variable('B');signature=variable('H');api_key=variable('H')
                 senders.append(sender)
+                assert 1 <= len(sender) <= 8
                 assert target==b'SPOT' and api_key==b'test-key'
                 sending_time=struct.unpack_from('<q',data,18)[0]
-                stamp=datetime.datetime.fromtimestamp(sending_time/1000000,datetime.timezone.utc).strftime('%Y%m%d-%H:%M:%S.%f')[:21]
+                stamp=datetime.datetime.fromtimestamp(sending_time/1000000,datetime.timezone.utc).strftime('%Y%m%d-%H:%M:%S.%f')
                 payload=b'\x01'.join([b'A',sender,target,b'1',stamp.encode()])
                 payload_path=directory/('payload-'+sender.decode());signature_path=directory/('signature-'+sender.decode())
                 payload_path.write_bytes(payload);signature_path.write_bytes(base64.b64decode(signature))
