@@ -63,7 +63,7 @@ class ExecutionManagementServiceBinance : public ExecutionManagementServiceBinan
     if (base.find("responseFormat=") != std::string::npos || base.find("sbeSchemaId=") != std::string::npos ||
         base.find("sbeSchemaVersion=") != std::string::npos) throw std::runtime_error("Configure SBE through the subscription option, not the base URL");
     return base + (base.find('?') == std::string::npos ? "?" : "&") +
-        "responseFormat=sbe&sbeSchemaId=3&sbeSchemaVersion=4";
+        "responseFormat=sbe&sbeSchemaId=3&sbeSchemaVersion=5";
   }
 
   void prepareConnect(std::shared_ptr<WsConnection> connection) override {

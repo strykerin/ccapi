@@ -107,6 +107,18 @@ TEST(BinanceProtocolSbe, OlderFixSchemaAndNullCharacter) {
   EXPECT_FALSE(decoded.HasMember("25056"));
   EXPECT_STREQ(decoded["39"].GetString(), "0");
 }
+TEST(BinanceProtocolSbe, WebsocketSchemaFiveAndPreviousVersion) {
+  for (const auto& name : {"ws_logon", "ws_logon_v4", "ws_ack", "ws_ack_v4"}) {
+    rapidjson::Document doc;
+    auto decoded = codec::Ws::decode(fixture(name), doc.GetAllocator());
+    EXPECT_STREQ(decoded["status"].GetString(), "200");
+    ASSERT_TRUE(decoded.HasMember("result"));
+    if (std::string(name).find("logon") != std::string::npos)
+      EXPECT_STREQ(decoded["result"]["apiKey"].GetString(), "test-key");
+    else EXPECT_STREQ(decoded["result"]["orderId"].GetString(), "12345");
+  }
+  EXPECT_EQ(codec::Reader(fixture("ws_logon")).at<uint16_t>(6), 5);
+}
 class BinanceProtocolServiceTest : public ::testing::Test {
  public:
   ServiceContext context;
@@ -124,6 +136,17 @@ class BinanceProtocolServiceTest : public ::testing::Test {
     return std::make_shared<WsConnection>("wss://example.test/ws-api/v3", "", std::vector<Subscription>{sub}, std::map<std::string,std::string>{});
   }
 };
+TEST_F(BinanceProtocolServiceTest, UnsupportedWebsocketSchemaReportsBothVersions) {
+  auto bytes = fixture("ws_logon");
+  bytes[6] = 6;
+  ws->onBinaryMessage(wsConnection(), bytes, received);
+  ASSERT_EQ(events.size(), 1U);
+  const auto& message = events[0].getMessageList()[0];
+  EXPECT_EQ(message.getType(), Message::Type::SUBSCRIPTION_FAILURE);
+  EXPECT_EQ(message.getCorrelationIdList(), std::vector<std::string>{"ws-sbe"});
+  const auto reason = message.getElementList()[0].getValue(CCAPI_ERROR_MESSAGE);
+  EXPECT_NE(reason.find("received 3:6, supported through 3:5"), std::string::npos);
+}
 TEST_F(BinanceProtocolServiceTest, WsAckAndCancelKeepRequestCorrelationAndReceiveTime) {
   auto connection = wsConnection();
   ws->requestCorrelationIdByWsRequestIdByConnectionIdMap[connection->id][7] = "request-7";
@@ -201,7 +224,7 @@ TEST_F(BinanceProtocolServiceTest, RejectedLogonDoesNotReconnectInATightLoop) {
 TEST_F(BinanceProtocolServiceTest, JsonRemainsDefaultAndConnectionsAreIndependent) {
   EXPECT_FALSE(ExecutionManagementServiceBinance::usesSbeOrderEntry(Subscription{}));
   EXPECT_FALSE(FixServiceBinance::usesSbe(Subscription{}));
-  EXPECT_EQ(ws->sbeOrderEntryUrl("wss://example.test/ws-api/v3"), "wss://example.test/ws-api/v3?responseFormat=sbe&sbeSchemaId=3&sbeSchemaVersion=4");
+  EXPECT_EQ(ws->sbeOrderEntryUrl("wss://example.test/ws-api/v3"), "wss://example.test/ws-api/v3?responseFormat=sbe&sbeSchemaId=3&sbeSchemaVersion=5");
   EXPECT_THROW(ws->sbeOrderEntryUrl("wss://example.test/?responseFormat=json"), std::runtime_error);
   auto connection = wsConnection();
   ws->onBinaryMessage(connection, "bad", received);

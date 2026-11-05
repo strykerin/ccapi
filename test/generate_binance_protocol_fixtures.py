@@ -59,7 +59,8 @@ class Schema:
         return head+body
 
 fix=Schema(ROOT/'spec/spot-fixsbe-1_2.xml')
-ws=Schema(ROOT/'spec/spot_3_4.xml')
+ws=Schema(ROOT/'spec/spot_3_5.xml')
+ws_previous=Schema(ROOT/'spec/spot_3_4.xml')
 def save(name,data): (OUT/(name+'.bin')).write_bytes(data)
 
 def wrapped(tid,values,request_id='order_place7',status=200):
@@ -88,11 +89,13 @@ def generate():
 
     base=dict(priceExponent=-2,qtyExponent=-8,orderId=12345,transactTime=NOW,price=35000025,origQty=10000,orderType=1,side=0,symbol='BTCBRL',clientOrderId='benchmark-1')
     save('ws_ack',wrapped(300,base))
+    save('ws_ack_v4',ws_previous.message(50,dict(status=200,id='order_place7',result=ws_previous.message(300,base))))
     save('ws_result',wrapped(301,base))
     save('ws_full',wrapped(302,dict(base,fills=[dict(commissionExponent=-8,price=35000025,qty=10000,commission=1,commissionAsset='BTC',tradeId=101)])))
     save('ws_cancel',wrapped(305,dict(base,origClientOrderId='benchmark-1'),'order_cancel8'))
     save('ws_error',wrapped(100,dict(code=-2010,msg='Insufficient balance'),status=400))
     save('ws_logon',wrapped(51,dict(authorizedSince=NOW,connectedSince=NOW,serverTime=NOW,loggedOnApiKey='test-key'),'session_logon'))
+    save('ws_logon_v4',ws_previous.message(50,dict(status=200,id='session_logon',result=ws_previous.message(51,dict(authorizedSince=NOW,connectedSince=NOW,serverTime=NOW,loggedOnApiKey='test-key')))))
     save('ws_execution',ws.message(603,dict(base,eventTime=NOW,transactTime=NOW,executionType=4,orderStatus=2,executedQty=10000,lastQty=10000,lastPrice=35000025,tradeId=101,commissionExponent=-8,commission=1,commissionAsset='BTC')))
     save('ws_balance',ws.message(607,dict(eventTime=NOW,updateTime=NOW,balances=[dict(exponent=-8,free=100000000,locked=0,asset='BTC')])) )
 

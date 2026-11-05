@@ -1435,7 +1435,7 @@ inline rj::Value decode(std::string_view bytes, Allocator& allocator, unsigned d
   auto templateId = reader.read<uint16_t>();
   if (reader.read<uint16_t>() != schemaId) throw std::runtime_error("Unexpected SBE schema ID");
   auto version = reader.read<uint16_t>();
-  if (version > schemaVersion) throw std::runtime_error("Unsupported SBE schema version");
+  if (version > schemaVersion) throw std::runtime_error("Unsupported SBE schema version: received " + std::to_string(schemaId) + ":" + std::to_string(version) + ", supported through " + std::to_string(schemaId) + ":" + std::to_string(schemaVersion));
   auto sequence = reader.read<uint32_t>();
   auto sendingTime = reader.read<int64_t>();
   rj::Value out;

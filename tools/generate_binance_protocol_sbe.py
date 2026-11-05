@@ -82,7 +82,7 @@ def generate(filename, ns, selected=None):
     out+=['inline rj::Value decode(std::string_view bytes, Allocator& allocator, unsigned depth) {','  if (depth > 4 || bytes.size() > (1u << 20)) throw std::runtime_error("SBE message limit exceeded");','  Reader reader(bytes);']
     if fix:
         out+=['  if (reader.read<uint32_t>() != bytes.size() || reader.read<uint16_t>() != 0xeb50) throw std::runtime_error("Invalid FIX SBE SOFH");']
-    out+=['  auto blockLength = reader.read<uint16_t>();','  auto templateId = reader.read<uint16_t>();','  if (reader.read<uint16_t>() != schemaId) throw std::runtime_error("Unexpected SBE schema ID");','  auto version = reader.read<uint16_t>();','  if (version > schemaVersion) throw std::runtime_error("Unsupported SBE schema version");']
+    out+=['  auto blockLength = reader.read<uint16_t>();','  auto templateId = reader.read<uint16_t>();','  if (reader.read<uint16_t>() != schemaId) throw std::runtime_error("Unexpected SBE schema ID");','  auto version = reader.read<uint16_t>();','  if (version > schemaVersion) throw std::runtime_error("Unsupported SBE schema version: received " + std::to_string(schemaId) + ":" + std::to_string(version) + ", supported through " + std::to_string(schemaId) + ":" + std::to_string(schemaVersion));']
     if fix: out+=['  auto sequence = reader.read<uint32_t>();','  auto sendingTime = reader.read<int64_t>();']
     out+=['  rj::Value out;', '  switch (templateId) {']
     for m in messages:
@@ -128,4 +128,4 @@ def generate(filename, ns, selected=None):
     path.write_text('\n'.join(out)+'\n')
 
 generate('spot-fixsbe-1_2.xml','Fix')
-generate('spot_3_4.xml','Ws',{50,51,52,53,100,101,300,301,302,305,503,504,601,602,603,604,606,607,610})
+generate('spot_3_5.xml','Ws',{50,51,52,53,100,101,300,301,302,305,503,504,601,602,603,604,606,607,610})

@@ -44,7 +44,7 @@ def test(executable):
                 head=b''
                 while b'\r\n\r\n' not in head: head+=exact(sock,1)
                 headers=head.decode();sbe='responseFormat=sbe' in headers
-                if sbe: assert 'sbeSchemaId=3&sbeSchemaVersion=4' in headers
+                if sbe: assert 'sbeSchemaId=3&sbeSchemaVersion=5' in headers
                 key_value=next(line.split(':',1)[1].strip() for line in headers.split('\r\n') if line.lower().startswith('sec-websocket-key:'))
                 accept=base64.b64encode(hashlib.sha1((key_value+'258EAFA5-E914-47DA-95CA-C5AB0DC85B11').encode()).digest()).decode()
                 sock.sendall(('HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: '+accept+'\r\n\r\n').encode())

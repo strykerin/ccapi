@@ -8,7 +8,7 @@ the defaults, and can run alongside SBE connections in the same Session.
 | WebSocket market data JSON | default | JSON controls | JSON |
 | WebSocket market data SBE | `BINANCE_MARKET_DATA_ENCODING=SBE` | JSON controls | SBE stream schema 1:0 |
 | WebSocket order entry JSON | default | JSON | JSON |
-| WebSocket order entry SBE | `BINANCE_WEBSOCKET_ORDER_ENTRY_ENCODING=SBE` | JSON | SBE API schema 3:4 |
+| WebSocket order entry SBE | `BINANCE_WEBSOCKET_ORDER_ENTRY_ENCODING=SBE` | JSON | SBE API schema 3:5 |
 | FIX market data / order entry SBE | `BINANCE_FIX_ENCODING=SBE` | SBE FIX schema 1:1 | SBE FIX schemas 1:0–1:2 |
 
 These are Spot-only additions. This change does not configure the engine, select
@@ -39,8 +39,9 @@ Wait for each `AUTHORIZATION_SUCCESS` before sending through
 construction remains unchanged. For ACK comparisons, set `newOrderRespType=ACK`
 explicitly on both paths. Both paths send JSON requests; SBE describes responses.
 
-The SBE connection adds `responseFormat=sbe&sbeSchemaId=3&sbeSchemaVersion=4`
-to the WebSocket API URL. New-order ACK/RESULT/FULL, cancellation responses,
+The SBE connection adds `responseFormat=sbe&sbeSchemaId=3&sbeSchemaVersion=5`
+to the WebSocket API URL. The decoder retains 3:4 compatibility; newer unsupported
+versions fail explicitly with the received and supported schema numbers. New-order ACK/RESULT/FULL, cancellation responses,
 errors, session logon and user-data subscription responses are decoded into the
 existing ccapi response types and preserve each request's correlation ID.
 `ORDER_UPDATE`, `PRIVATE_TRADE` and `BALANCE_UPDATE` subscription fields also work:
