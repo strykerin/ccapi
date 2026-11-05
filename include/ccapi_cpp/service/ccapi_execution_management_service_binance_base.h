@@ -107,6 +107,14 @@ class ExecutionManagementServiceBinanceBase : public ExecutionManagementService 
   }
 
   void prepareConnect(std::shared_ptr<WsConnection> wsConnectionPtr) override {
+    const auto& options = wsConnectionPtr->subscriptionList.at(0).getOptionMap();
+    auto encoding = options.find(CCAPI_BINANCE_WEBSOCKET_ORDER_ENTRY_ENCODING);
+    if (encoding != options.end() && encoding->second != "JSON" &&
+        (this->exchangeName != CCAPI_EXCHANGE_NAME_BINANCE || encoding->second != "SBE")) {
+      this->onError(Event::Type::SUBSCRIPTION_STATUS, Message::Type::SUBSCRIPTION_FAILURE,
+                    "SBE websocket order entry is only supported for Binance Spot", wsConnectionPtr->correlationIdList);
+      return;
+    }
     const auto& fieldSet = wsConnectionPtr->subscriptionList.at(0).getFieldSet();
     bool orderEntry = this->useWebsocketOrderEntryConnection(fieldSet);
     this->connectionRoleByConnectionIdMap[wsConnectionPtr->id] =

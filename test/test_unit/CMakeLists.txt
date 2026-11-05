@@ -58,3 +58,5 @@ add_subdirectory(src/execution_management/gateio)
 # add_subdirectory(src/execution_management/kraken)
 # add_subdirectory(src/execution_management/kraken_futures)
 add_subdirectory(src/execution_management/okx)
+
+add_subdirectory(src/binance_protocol_sbe)

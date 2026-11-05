@@ -399,8 +399,9 @@ and exact mantissa/exponent conversion without floating point. Unsupported
 schemas/templates, malformed binary payloads and sequence gaps fail the feed
 and reconnect; they never fall back silently to JSON. `serverShutdown` also
 closes and reconnects. Unsupported subscription fields are rejected before
-connecting. SBE does not apply to Binance.US, Futures, order entry or account
-streams; those retain their existing protocols.
+connecting. This market-data option does not affect Binance.US, Futures or
+order entry. Spot order-entry response encoding and FIX SBE are separate
+opt-ins described in [Binance protocol comparisons](docs/binance-protocol-comparison.md).
 
 Protocol and schema: [Binance SBE market data](https://github.com/binance/binance-spot-api-docs/blob/master/sbe-market-data-streams.md),
 [stream schema 1:0](https://github.com/binance/binance-spot-api-docs/blob/master/sbe/schemas/stream_1_0.xml).
@@ -881,6 +882,12 @@ Subscription subscription("bybit", "BTCUSDT", "MARKET_DEPTH");
 subscription.setInstrumentType("spot");
 session.subscribe(subscription);
 ```
+
+### Binance Spot protocol comparisons
+
+The fork supports concurrent WebSocket JSON, WebSocket SBE and FIX SBE
+connections for reception and order-entry experiments. See
+[the setup, API contracts and limitations](docs/binance-protocol-comparison.md).
 
 ### FIX API
 

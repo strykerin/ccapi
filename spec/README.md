@@ -1,0 +1,14 @@
+# Binance SBE schemas
+
+These files are vendored from Binance's public Spot API documentation:
+
+- [spot-fixsbe-1_2.xml](https://raw.githubusercontent.com/binance/binance-spot-api-docs/master/sbe/schemas/spot-fixsbe-1_2.xml): FIX schema 1:2.
+- [spot_3_4.xml](https://raw.githubusercontent.com/binance/binance-spot-api-docs/master/sbe/schemas/spot_3_4.xml): WebSocket/REST schema 3:4.
+
+The similarly named `spot-fixsbe-1_1.xml` upstream entry currently contains an
+alias to `spot-fixsbe-1_2.xml`; the complete XML is checked in here. The generator
+uses the checked-in files, never a moving `latest` URL. Update the decoder,
+fixtures and subscription negotiation together when upgrading a schema.
+
+Regenerate headers with `python3 tools/generate_binance_protocol_sbe.py` and
+fixtures with `python3 test/generate_binance_protocol_fixtures.py`.
