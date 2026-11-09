@@ -356,6 +356,9 @@ Best bid and ask at 2020-07-27T23:56:51.935993000Z are:
 Binance Spot supports opt-in SBE subscriptions for incremental depth (20 ms nominal), public trades, and best bid/ask.
 See the [SBE options, credentials, protocol details and example](spec/binance/README.md). JSON remains the default.
 
+OKX also supports opt-in SBE market data: incremental depth (10 ms nominal), public trades, and real-time best bid/ask.
+See the [OKX SBE options, credentials and example](spec/okx/README.md). Order entry and private updates remain WebSocket + JSON.
+
 #### Complex request parameters
 Please follow the exchange's API documentations: e.g. https://bybit-exchange.github.io/docs/v5/market/instrument.
 ```

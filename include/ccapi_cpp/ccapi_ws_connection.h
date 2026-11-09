@@ -21,9 +21,9 @@ class WsConnection {
       : url(url), group(group), subscriptionList(subscriptionList), credential(credential), proxyUrl(proxyUrl) {
     std::map<std::string, std::string> shortCredential;
     for (const auto& x : credential) {
-      shortCredential.insert(std::make_pair(x.first, this->isBinanceSpotSbe() || x.first == CCAPI_BINANCE_SBE_API_KEY
-                                                       ? "[REDACTED]"
-                                                       : UtilString::firstNCharacter(x.second, CCAPI_CREDENTIAL_DISPLAY_LENGTH)));
+      shortCredential.insert(std::make_pair(x.first, this->isBinanceSpotSbe() || this->isOkxSbe() || x.first == CCAPI_BINANCE_SBE_API_KEY
+                                                         ? "[REDACTED]"
+                                                         : UtilString::firstNCharacter(x.second, CCAPI_CREDENTIAL_DISPLAY_LENGTH)));
     }
     this->longId = this->url + "||" + this->group + "||" + ccapi::toString(this->subscriptionList) + "||" + ccapi::toString(shortCredential);
     this->id = UtilAlgorithm::shortBase62Hash(this->longId);
@@ -37,12 +37,14 @@ class WsConnection {
 
   bool isBinanceSpotSbe() const { return !subscriptionList.empty() && subscriptionList.front().isBinanceSpotSbe(); }
 
+  bool isOkxSbe() const { return !subscriptionList.empty() && subscriptionList.front().isOkxSbe(); }
+
   std::string toString() const {
     std::map<std::string, std::string> shortCredential;
     for (const auto& x : credential) {
-      shortCredential.insert(std::make_pair(x.first, this->isBinanceSpotSbe() || x.first == CCAPI_BINANCE_SBE_API_KEY
-                                                       ? "[REDACTED]"
-                                                       : UtilString::firstNCharacter(x.second, CCAPI_CREDENTIAL_DISPLAY_LENGTH)));
+      shortCredential.insert(std::make_pair(x.first, this->isBinanceSpotSbe() || this->isOkxSbe() || x.first == CCAPI_BINANCE_SBE_API_KEY
+                                                         ? "[REDACTED]"
+                                                         : UtilString::firstNCharacter(x.second, CCAPI_CREDENTIAL_DISPLAY_LENGTH)));
     }
     std::ostringstream oss;
     std::visit(
@@ -56,8 +58,8 @@ class WsConnection {
         streamPtr);
     std::string output = "WsConnection [longId = " + longId + ", id = " + id + ", url = " + url + ", group = " + group +
                          ", subscriptionList = " + ccapi::toString(subscriptionList) + ", credential = " + ccapi::toString(shortCredential) +
-                         ", proxyUrl = " + proxyUrl + ", status = " + statusToString(status) + ", headers = " +
-                         (this->isBinanceSpotSbe() ? "[REDACTED]" : ccapi::toString(headers)) +
+                         ", proxyUrl = " + proxyUrl + ", status = " + statusToString(status) +
+                         ", headers = " + (this->isBinanceSpotSbe() || this->isOkxSbe() ? "[REDACTED]" : ccapi::toString(headers)) +
                          ", streamPtr = " + oss.str() + ", remoteCloseCode = " + std::to_string(remoteCloseCode) +
                          ", remoteCloseReason = " + std::string(remoteCloseReason.reason.c_str()) +
                          ", hostHttpHeaderValue = " + ccapi::toString(hostHttpHeaderValue) + ", path = " + ccapi::toString(path) +

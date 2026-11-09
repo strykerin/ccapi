@@ -828,6 +828,38 @@ TEST_F(ExecutionManagementServiceOkxTest, createEventBalanceUpdateEmptyDetails) 
   EXPECT_EQ(messageList.size(), 0);
 }
 
+TEST_F(ExecutionManagementServiceOkxTest, sbeMarketDataOptionsDoNotChangePrivateJsonProtocol) {
+  Subscription subscription("okx", "BTC-USDT", CCAPI_EM_WEBSOCKET_ORDER_ENTRY, "OKX_MARKET_DATA_FORMAT=SBE", "private", this->credential);
+  auto connection = std::make_shared<WsConnection>(this->service->baseUrlWsOrderEntry, "", std::vector<Subscription>{subscription}, this->credential);
+  EXPECT_FALSE(connection->isOkxSbe());
+  EXPECT_EQ(connection->url, "wss://ws.okx.com/ws/v5/private");
+  EXPECT_EQ(this->service->baseUrlWs, "wss://ws.okx.com/ws/v5/private");
+  auto login = this->service->createSendStringListFromSubscription(connection, subscription, this->now, this->credential);
+  rj::Document document;
+  document.Parse(login.front().c_str());
+  EXPECT_STREQ(document["op"].GetString(), "login");
+  for (auto operation : {Request::Operation::CREATE_ORDER, Request::Operation::CANCEL_ORDER}) {
+    Request request(operation, "okx", "BTC-USDT", "request", this->credential);
+    request.appendParam(
+        {{CCAPI_EM_ORDER_SIDE, CCAPI_EM_ORDER_SIDE_BUY}, {CCAPI_EM_ORDER_QUANTITY, "1"}, {CCAPI_EM_ORDER_LIMIT_PRICE, "1"}, {CCAPI_EM_ORDER_ID, "123"}});
+    rj::Document payload;
+    this->service->convertRequestForWebsocket(payload, payload.GetAllocator(), connection, request, 1, this->now, "BTC-USDT", this->credential);
+    EXPECT_STREQ(payload["op"].GetString(), operation == Request::Operation::CREATE_ORDER ? "order" : "cancel-order");
+    EXPECT_TRUE(payload["args"].IsArray());
+    EXPECT_TRUE(payload["args"][0].IsObject());
+  }
+  Subscription balance("okx", "", CCAPI_EM_BALANCE_UPDATE, "OKX_MARKET_DATA_FORMAT=SBE", "balance");
+  std::string text =
+      R"({"arg":{"channel":"account"},"data":[{"uTime":"1705558381203","details":[{"ccy":"USDT","cashBal":"2","availEq":"1","availBal":"1"}]}]})";
+  rj::Document data;
+  data.Parse<rj::kParseNumbersAsStringsFlag>(text.c_str());
+  auto event = this->service->createEvent(connection, balance, text, data, "", this->now);
+  ASSERT_EQ(event.getMessageList().size(), 1);
+  EXPECT_EQ(event.getMessageList()[0].getType(), Message::Type::EXECUTION_MANAGEMENT_EVENTS_BALANCE_UPDATE);
+  EXPECT_EQ(event.getMessageList()[0].getCorrelationIdList()[0], "balance");
+  EXPECT_EQ(event.getMessageList()[0].getElementList()[0].getValue(CCAPI_EM_QUANTITY_TOTAL), "2");
+}
+
 } /* namespace ccapi */
 #endif
 #endif

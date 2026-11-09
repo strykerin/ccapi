@@ -65,9 +65,9 @@ class Subscription {
   std::string toString() const {
     std::map<std::string, std::string> shortCredential;
     for (const auto& x : credential) {
-      shortCredential.insert(std::make_pair(x.first, this->isBinanceSpotSbe() || x.first == CCAPI_BINANCE_SBE_API_KEY
-                                                       ? "[REDACTED]"
-                                                       : UtilString::firstNCharacter(x.second, CCAPI_CREDENTIAL_DISPLAY_LENGTH)));
+      shortCredential.insert(std::make_pair(x.first, this->isBinanceSpotSbe() || this->isOkxSbe() || x.first == CCAPI_BINANCE_SBE_API_KEY
+                                                         ? "[REDACTED]"
+                                                         : UtilString::firstNCharacter(x.second, CCAPI_CREDENTIAL_DISPLAY_LENGTH)));
     }
     std::string output = "Subscription [exchange = " + exchange + ", marginType = " + marginType + ", instrumentType = " + instrumentType +
                          ", instrument = " + instrument + ", field = " + field + ", optionMap = " + ccapi::toString(optionMap) +
@@ -81,6 +81,11 @@ class Subscription {
   bool isBinanceSpotSbe() const {
     auto it = this->optionMap.find(CCAPI_BINANCE_MARKET_DATA_FORMAT);
     return this->exchange == CCAPI_EXCHANGE_NAME_BINANCE && this->serviceName == CCAPI_MARKET_DATA && it != this->optionMap.end() && it->second == "SBE";
+  }
+
+  bool isOkxSbe() const {
+    auto it = this->optionMap.find(CCAPI_OKX_MARKET_DATA_FORMAT);
+    return this->exchange == CCAPI_EXCHANGE_NAME_OKX && this->serviceName == CCAPI_MARKET_DATA && it != this->optionMap.end() && it->second == "SBE";
   }
 
   const std::string& getExchange() const { return exchange; }
