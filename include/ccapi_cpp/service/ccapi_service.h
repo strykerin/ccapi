@@ -35,6 +35,7 @@
 #define CCAPI_WEBSOCKET_WRITE_BUFFER_SIZE (1 << 20)
 #endif
 
+#include <cstddef>
 #include <regex>
 
 #include "boost/asio/strand.hpp"
@@ -1129,7 +1130,7 @@ class Service : public std::enable_shared_from_this<Service> {
           }));
 
           CCAPI_LOGGER_TRACE("before ws async_handshake");
-          stream.async_handshake(wsConnectionPtr->hostHttpHeaderValue, wsConnectionPtr->path,
+          stream.async_handshake(wsConnectionPtr->handshakeResponse, wsConnectionPtr->hostHttpHeaderValue, wsConnectionPtr->path,
                                  beast::bind_front_handler(&Service::onWsHandshakeWs, shared_from_this(), wsConnectionPtr));
           CCAPI_LOGGER_TRACE("after ws async_handshake");
         },
@@ -1140,7 +1141,7 @@ class Service : public std::enable_shared_from_this<Service> {
     CCAPI_LOGGER_TRACE("ws async_handshake callback start");
     if (ec) {
       CCAPI_LOGGER_TRACE("ws handshake fail");
-      this->onFail(wsConnectionPtr);
+      this->onWsHandshakeError(wsConnectionPtr, ec);
       return;
     }
     CCAPI_LOGGER_TRACE("ws handshaked");
@@ -1469,6 +1470,9 @@ class Service : public std::enable_shared_from_this<Service> {
               this->onError(Event::Type::SUBSCRIPTION_STATUS, Message::Type::GENERIC_ERROR, e);
             }
           } else if (stream.got_binary()) {
+            if (this->onBinaryMessage(wsConnectionPtr, boost::beast::string_view(data, dataSize), now)) {
+              return;
+            }
             CCAPI_LOGGER_DEBUG("received a binary message: " + UtilAlgorithm::stringToHex(std::string(data, dataSize)));
 
 #if CCAPI_REQUIRES_INFLATE_STREAM
@@ -1648,6 +1652,12 @@ class Service : public std::enable_shared_from_this<Service> {
 
   virtual void onTextMessage(std::shared_ptr<WsConnection> wsConnectionPtr, boost::beast::string_view textMessage, const TimePoint& timeReceived) {}
 
+  virtual bool onBinaryMessage(std::shared_ptr<WsConnection> wsConnectionPtr, boost::beast::string_view message, const TimePoint& timeReceived) {
+    return false;
+  }
+
+  virtual void onWsHandshakeError(std::shared_ptr<WsConnection> wsConnectionPtr, const ErrorCode& ec) { this->onFail(wsConnectionPtr); }
+
   bool hostHttpHeaderValueIgnorePort{};
   std::string apiKeyName;
   std::string apiSecretName;
@@ -1695,7 +1705,7 @@ class Service : public std::enable_shared_from_this<Service> {
   InflateStream inflater;
 #endif
 
-  std::array<char, CCAPI_JSON_PARSE_BUFFER_SIZE> jsonParseBuffer;
+  alignas(std::max_align_t) std::array<char, CCAPI_JSON_PARSE_BUFFER_SIZE> jsonParseBuffer;
   rj::MemoryPoolAllocator<> jsonDocumentAllocator;
 };
 

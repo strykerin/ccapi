@@ -353,6 +353,9 @@ Best bid and ask at 2020-07-27T23:56:51.935993000Z are:
 
 ### Advanced Market Data
 
+Binance Spot supports opt-in SBE subscriptions for incremental depth (20 ms nominal), public trades, and best bid/ask.
+See the [SBE options, credentials, protocol details and example](spec/binance/README.md). JSON remains the default.
+
 #### Complex request parameters
 Please follow the exchange's API documentations: e.g. https://bybit-exchange.github.io/docs/v5/market/instrument.
 ```

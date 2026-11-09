@@ -1,0 +1,7 @@
+set(NAME market_data_binance_sbe)
+project(${NAME})
+add_compile_definitions(CCAPI_ENABLE_SERVICE_MARKET_DATA)
+add_compile_definitions(CCAPI_ENABLE_EXCHANGE_BINANCE)
+add_executable(${NAME} ${SOURCE_LOGGER} test.cpp)
+add_dependencies(${NAME} boost rapidjson)
+gtest_discover_tests(${NAME})
