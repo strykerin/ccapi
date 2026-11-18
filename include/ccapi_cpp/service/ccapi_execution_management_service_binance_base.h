@@ -752,6 +752,20 @@ class ExecutionManagementServiceBinanceBase : public ExecutionManagementService 
             message.setElementList(elementList);
             message.setCorrelationIdList({requestCorrelationId});
           }
+          if (document.HasMember("rateLimits") && document["rateLimits"].IsArray()) {
+            // The main parser reads numbers as strings. Parse the original payload here to preserve
+            // JSON number types and every returned interval (including repeated rateLimitType values).
+            rj::Document rawDocument;
+            rawDocument.Parse(textMessageView.data(), textMessageView.size());
+            if (!rawDocument.HasParseError() && rawDocument.IsObject() && rawDocument.HasMember("rateLimits") && rawDocument["rateLimits"].IsArray()) {
+              rj::StringBuffer buffer;
+              rj::Writer<rj::StringBuffer> writer(buffer);
+              rawDocument["rateLimits"].Accept(writer);
+              auto elementList = message.getElementList();
+              elementList.front().insert(CCAPI_EM_RATE_LIMITS, buffer.GetString());
+              message.setElementList(elementList);
+            }
+          }
           messageList.emplace_back(std::move(message));
         }
       }

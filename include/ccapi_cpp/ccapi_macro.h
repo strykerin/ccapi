@@ -628,6 +628,11 @@
 #define CCAPI_EM_ORDER_QUANTITY "QUANTITY"
 #endif
 
+// JSON array of exchange-provided rate limits on a websocket order response.
+#ifndef CCAPI_EM_RATE_LIMITS
+#define CCAPI_EM_RATE_LIMITS "RATE_LIMITS"
+#endif
+
 #ifndef CCAPI_EM_ORDER_LIMIT_PRICE
 #define CCAPI_EM_ORDER_LIMIT_PRICE "LIMIT_PRICE"
 #endif

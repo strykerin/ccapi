@@ -810,6 +810,37 @@ request.appendParam({
 session.sendRequestByWebsocket(websocketOrderEntrySubscriptionCorrelationId, request);
 ```
 
+Binance WebSocket order-entry responses (`CREATE_ORDER`, `CANCEL_ORDER`, and
+`RESPONSE_ERROR` in an `Event::Type::RESPONSE`) expose the optional
+`CCAPI_EM_RATE_LIMITS` (`"RATE_LIMITS"`) field on the existing response element.
+Its value is a JSON array preserving all returned entries, fields and numeric types,
+including multiple `ORDERS` intervals. The field is absent when the response omits
+`rateLimits`; an empty array is exposed as `[]`. Existing order fields, error JSON
+in `CCAPI_ERROR_MESSAGE`, and request correlation IDs are preserved.
+
+```cpp
+// Inside the event handler, for Binance order-entry response messages:
+for (const auto& message : event.getMessageList()) {
+  for (const auto& element : message.getElementList()) {
+    if (!element.has(CCAPI_EM_RATE_LIMITS)) continue;
+    rj::Document limits;
+    limits.Parse(element.getValue(CCAPI_EM_RATE_LIMITS).c_str());
+    for (const auto& entry : limits.GetArray()) {
+      if (std::string(entry["rateLimitType"].GetString()) == "ORDERS") {
+        // Process each interval separately; do not key only by rateLimitType.
+        std::cout << entry["interval"].GetString() << " "
+                  << entry["intervalNum"].GetUint64() << " "
+                  << entry["limit"].GetUint64() << " "
+                  << entry["count"].GetUint64() << std::endl;
+      }
+    }
+  }
+}
+```
+
+These are exchange-provided snapshots; ccapi does not implement a rate limiter
+or synthesize counts when Binance omits them.
+
 #### Specify instrument type
 Some exchanges (i.e. bybit) might need instrument type for `Subscription`. Use `Subscription`'s `setInstrumentType` method.
 ```
